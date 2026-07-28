@@ -222,10 +222,19 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
     <div id="reports-view" style="display:none">
       <div class="report-tabs" id="report-tabs"></div>
       <div class="report-toolbar">
-        <input id="report-search" placeholder="Filtrar por nome/SKU/EAN..." style="max-width:300px">
-        <label style="font-size:.8rem;display:flex;align-items:center;gap:4px;cursor:pointer">
-          <input type="checkbox" id="report-show-inactive"> Incluir inativos
+        <input id="report-search" placeholder="Filtrar por nome/SKU/EAN..." style="max-width:220px">
+        <label style="font-size:.75rem;display:flex;align-items:center;gap:4px;cursor:pointer">
+          <input type="checkbox" id="report-show-inactive"> Inativos
         </label>
+        <select id="report-sort" style="max-width:130px;font-size:.8rem">
+          <option value="">Ordenar por</option>
+          <option value="desc">Nome A-Z</option>
+          <option value="desc_desc">Nome Z-A</option>
+          <option value="preco_asc">Preço ↑</option>
+          <option value="preco_desc">Preço ↓</option>
+          <option value="estoque_asc">Estoque ↑</option>
+          <option value="estoque_desc">Estoque ↓</option>
+        </select>
         <button class="btn-s btn-sm" id="btn-export-csv">Exportar CSV</button>
       </div>
       <div style="overflow-x:auto"><table class="report-table" id="report-table"><thead></thead><tbody></tbody></table></div>
@@ -318,52 +327,81 @@ async function apiAuth(endpoint, body) {
   return resp.json();
 }
 
-/* ===== DATA LOADING ===== */
-async function loadAll(entity, mapper, onProgress) {
-  let page = 1, all = [];
-  const perPage = PER_PAGE;
-  while (true) {
-    await delay(RATE_DELAY);
-    const r = await apiGet(entity, { page, per_page: perPage });
-    const data = r.data || [];
-    all = all.concat(data);
-    const total = r.total || 0;
-    if (onProgress) onProgress(all.length, total, entity);
-    if (all.length >= total || data.length === 0) break;
-    page++;
+/* ===== DATA LOADING (server-side cache) ===== */
+async function fetchFromCache(entity) {
+  const r = await apiGet('cache/' + entity);
+  if (!r.ok) throw new Error('Cache error');
+  return r.data || [];
+}
+
+async function loadAllData() {
+  $('#loading-view').style.display = 'flex';
+  $('#dashboard-view').style.display = $('#audit-view').style.display = $('#reports-view').style.display = 'none';
+  let statusEl = $('#load-status');
+  let progressEl = $('#load-progress');
+
+  const status = await apiGet('cache/status');
+  statusEl.textContent = status.ready ? 'Cache pronto. Carregando dados...' : 'Cache sendo sincronizado da API... (pode levar ~4 min)';
+  progressEl.style.width = status.ready ? '50%' : '10%';
+
+  // Poll until cache is ready
+  if (!status.ready) {
+    let retries = 0;
+    while (retries < 120) {
+      await delay(3000);
+      const s = await apiGet('cache/status');
+      progressEl.style.width = Math.min(10 + retries * 0.7, 50) + '%';
+      statusEl.textContent = `Cache sincronizando... ${s.counts?.produtos || 0} produtos carregados`;
+      if (s.ready) break;
+      retries++;
+    }
   }
-  if (mapper) mapper(all);
-  lsSet('audit_' + entity, all);
-  return all;
-}
 
-async function loadAllFiliais() {
-  const r = await apiGet('filiais', { per_page: 100 });
-  S.filiais = r.data || [];
-  lsSet(LS_KEYS.filiais, S.filiais);
-  return S.filiais;
-}
+  try {
+    progressEl.style.width = '55%';
+    statusEl.textContent = 'Carregando filiais...';
+    S.filiais = await fetchFromCache('filiais');
 
-async function loadAllProducts(onProgress) {
-  return loadAll('produtos', (all) => {
-    // ponytail: exclui produtos sem codigo de barras, nao sao bipaveis
-    S.products = all.filter(p => p.ean && p.ean.toString().trim());
+    progressEl.style.width = '70%';
+    statusEl.textContent = 'Carregando produtos...';
+    S.products = await fetchFromCache('produtos');
     buildIndexes();
-  }, onProgress);
-}
 
-async function loadAllStock(onProgress) {
-  return loadAll('produtos_estoques', (all) => {
+    progressEl.style.width = '80%';
+    statusEl.textContent = 'Carregando estoques...';
+    const stocks = await fetchFromCache('estoques');
     S.stockMap = {};
-    for (const s of all) S.stockMap[s.filial + '_' + s.idproduto] = s.qtd;
-  }, onProgress);
+    for (const s of stocks) S.stockMap[s.filial + '_' + s.idproduto] = s.qtd;
+
+    progressEl.style.width = '90%';
+    statusEl.textContent = 'Carregando preços...';
+    const prices = await fetchFromCache('precos');
+    S.pricesMap = {};
+    for (const p of prices) { if (!S.pricesMap[p.idproduto]) S.pricesMap[p.idproduto] = p; }
+
+    S.dataReady = true;
+    progressEl.style.width = '100%';
+    $('#loading-view').style.display = 'none';
+    $('#cache-status').textContent = fmtNum(S.products.length) + ' produtos (server cache)';
+    statusEl.textContent = 'Dados carregados com sucesso!';
+  } catch (e) {
+    statusEl.textContent = 'Erro: ' + e.message;
+    toast('Erro ao carregar dados: ' + e.message, 'err');
+  }
 }
 
-async function loadAllPrices(onProgress) {
-  return loadAll('precos', (all) => {
-    S.pricesMap = {};
-    for (const p of all) { if (!S.pricesMap[p.idproduto]) S.pricesMap[p.idproduto] = p; }
-  }, onProgress);
+async function reloadServerCache() {
+  try {
+    const resp = await fetch('/api/cache/reload', { method: 'POST' });
+    const r = await resp.json();
+    if (r.ok) toast('Recarregando dados da API no servidor...', 'ok');
+    else toast(r.error, 'warn');
+    await delay(2000);
+    await loadAllData();
+    return r;
+  } catch (e) {
+    toast('Erro ao recarregar cache', 'err');
+  }
 }
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -469,10 +507,12 @@ function getGlobalClassifications() {
   const discontinued = [];
   const seenEan = {};
   const seenSku = {};
-  
+  const seenDesc = {}; // normalized description -> [{id, codproduto}]
+
   for (const p of S.products) {
     const e = fmt(p.ean);
     const s = fmt(p.codproduto);
+    const desc = fmt(p.descricao).toLowerCase().replace(/[^a-z0-9áéíóúãõâêôàèìòùç ]/g, '').replace(/\s+/g, ' ').trim();
     if (!e) noEan.push(p.id);
     if (e && seenEan[e]) { dups[p.id] = true; dups[seenEan[e]] = true; }
     if (s && seenSku[s]) { dups[p.id] = true; dups[seenSku[s]] = true; }
@@ -481,7 +521,24 @@ function getGlobalClassifications() {
     if (!p.fornecedor || p.fornecedor == 0) noFornecedor.push(p.id);
     if (p.categoria == null) noCategoria.push(p.id);
     if (p.ativo === '0') discontinued.push(p.id);
+    // ponytail: duplicate detection by normalized description — catches renamed products
+    if (desc && desc.length > 5) {
+      if (!seenDesc[desc]) seenDesc[desc] = [];
+      seenDesc[desc].push({ id: p.id, codproduto: s });
+    }
   }
+
+  // Mark description-based duplicates (same desc, different codproduto)
+  for (const desc in seenDesc) {
+    const items = seenDesc[desc];
+    if (items.length > 1) {
+      const uniqueSkus = new Set(items.map(i => i.codproduto).filter(Boolean));
+      if (uniqueSkus.size > 1) {
+        items.forEach(i => { dups[i.id] = true; });
+      }
+    }
+  }
+
   return { noEan, dups, noFornecedor, noCategoria, discontinued };
 }
 
@@ -618,9 +675,38 @@ function showProductDetails(p) {
     <div class="prod-field"><span class="fld">Altura/Larg/Comp</span><span class="val">${p.altura||'-'} / ${p.largura||'-'} / ${p.comprimento||'-'}</span></div>
     <div class="prod-field"><span class="fld">Garantia (dias)</span><span class="val">${p.garantia || '-'}</span></div>
     <div class="prod-field"><span class="fld">Permite Encomenda</span><span class="val">${p.permiteencomenda === '1' ? 'Sim' : 'Não'}</span></div>
+    <div style="margin:8px 0;padding-top:8px;border-top:2px solid var(--border)">
+      <strong style="font-size:.85rem">Histórico de Vendas</strong>
+      <div id="sales-info-${p.id}" style="font-size:.8rem;color:var(--muted);padding:4px 0">
+        <button class="btn-p btn-sm" onclick="loadSalesStats(${p.id})">Carregar Vendas</button>
+      </div>
+    </div>
     ${!fmt(p.ean) ? `<div style="margin-top:8px"><button class="btn-w btn-sm" onclick="printLabel(${p.id})">Imprimir Etiqueta I9-${p.id}</button></div>` : ''}
   `;
   $('#product-panel-body').innerHTML = html;
+}
+
+async function loadSalesStats(productId) {
+  const el = $('#sales-info-' + productId);
+  el.innerHTML = '<span style="color:var(--muted)">Carregando...</span>';
+  try {
+    const resp = await fetch('/api/sales/' + productId);
+    const data = await resp.json();
+    if (!data.ok) throw new Error(data.error);
+    const s = data.stats;
+    const lastDate = s.last_sale_date ? new Date(s.last_sale_date + 'T00:00:00').toLocaleDateString('pt-BR') : '-';
+    el.innerHTML = `
+      <div class="prod-field"><span class="fld">Total Vendido</span><span class="val">${fmtNum(s.total_qty)} un</span></div>
+      <div class="prod-field"><span class="fld">Vendas</span><span class="val">${fmtNum(s.total_sales)} pedidos</span></div>
+      <div class="prod-field"><span class="fld">Faturamento</span><span class="val">${fmtMoney(s.total_value)}</span></div>
+      <div class="prod-field"><span class="fld">Última Venda</span><span class="val">${lastDate}</span></div>
+      <div class="prod-field"><span class="fld">Dias sem Vender</span><span class="val">${s.days_without_sale != null ? fmtNum(s.days_without_sale) + ' dias' : '-'}</span></div>
+      <div class="prod-field"><span class="fld">Primeira Venda</span><span class="val">${s.first_sale_date ? new Date(s.first_sale_date + 'T00:00:00').toLocaleDateString('pt-BR') : '-'}</span></div>
+      <div class="prod-field"><span class="fld">Média/Venda</span><span class="val">${s.total_sales > 0 ? fmtMoney(s.total_value / s.total_sales) : '-'}</span></div>
+    `;
+  } catch (e) {
+    el.innerHTML = '<span style="color:var(--d600)">Erro ao carregar vendas.</span>';
+  }
 }
 
 function showProductDetailsById(pid) {
@@ -893,6 +979,13 @@ function loadReport() {
       fmt(p.ean).includes(q)
     );
   }
+  const sort = ($('#report-sort').value || '');
+  if (sort === 'desc') data.sort((a, b) => fmt(a.descricao).localeCompare(fmt(b.descricao), 'pt-BR'));
+  else if (sort === 'desc_desc') data.sort((a, b) => fmt(b.descricao).localeCompare(fmt(a.descricao), 'pt-BR'));
+  else if (sort === 'preco_asc') data.sort((a, b) => (S.pricesMap[a.id]?.precovenda || 0) - (S.pricesMap[b.id]?.precovenda || 0));
+  else if (sort === 'preco_desc') data.sort((a, b) => (S.pricesMap[b.id]?.precovenda || 0) - (S.pricesMap[a.id]?.precovenda || 0));
+  else if (sort === 'estoque_asc') data.sort((a, b) => (S.stockMap['' + S.user.filialId + '_' + a.id] || 0) - (S.stockMap['' + S.user.filialId + '_' + b.id] || 0));
+  else if (sort === 'estoque_desc') data.sort((a, b) => (S.stockMap['' + S.user.filialId + '_' + b.id] || 0) - (S.stockMap['' + S.user.filialId + '_' + a.id] || 0));
   reportData = data;
   reportPage = 0;
   renderReportPage();
@@ -982,47 +1075,6 @@ function switchView(view) {
   $$('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
 }
 
-/* ===== FULL DATA LOAD ===== */
-async function loadAllData() {
-  $('#loading-view').style.display = 'flex';
-  $('#dashboard-view').style.display = 'none';
-  $('#audit-view').style.display = 'none';
-  $('#reports-view').style.display = 'none';
-
-  let progressEl = $('#load-progress');
-  let statusEl = $('#load-status');
-
-  const updateProgress = (loaded, total, label) => {
-    const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
-    progressEl.style.width = pct + '%';
-    statusEl.textContent = `${label}: ${loaded} de ${total}`;
-  };
-
-  try {
-    statusEl.textContent = 'Carregando filiais...';
-    await loadAllFiliais();
-
-    statusEl.textContent = 'Carregando produtos...';
-    await loadAllProducts(updateProgress);
-
-    statusEl.textContent = 'Carregando estoques...';
-    progressEl.style.width = '0%';
-    await loadAllStock(updateProgress);
-
-    statusEl.textContent = 'Carregando preços...';
-    progressEl.style.width = '0%';
-    await loadAllPrices(updateProgress);
-
-    S.dataReady = true;
-    $('#loading-view').style.display = 'none';
-    $('#cache-status').textContent = fmtNum(S.products.length) + ' produtos';
-    toast('Dados carregados com sucesso!', 'ok');
-  } catch (e) {
-    statusEl.textContent = 'Erro: ' + e.message;
-    toast('Erro ao carregar dados: ' + e.message, 'err');
-  }
-}
-
 /* ===== AUTH ===== */
 function popRegFilial() {
   const sel = $('#reg-filial');
@@ -1069,6 +1121,16 @@ function onAuthSuccess(user) {
   startAuditInternal();
 }
 
+function autoLoginIfSessionSaved() {
+  const prevState = lsGet(LS_KEYS.state);
+  if (prevState && prevState.email) {
+    S.user = { name: prevState.name, email: prevState.email, filialId: prevState.filialId, filialNome: '' };
+    const filial = S.filiais.find(f => f.id === prevState.filialId);
+    if (filial) S.user.filialNome = filial.fantasia || filial.razaocial;
+    if (S.dataReady) startAuditInternal();
+  }
+}
+
 function handleLogout() {
   if (S.session) finalizeSession();
   S.user = null;
@@ -1086,38 +1148,25 @@ async function init() {
   initBarcodeDetector();
   loadSessions();
 
-  const cachedProducts = lsGet(LS_KEYS.products);
-  const cachedFiliais = lsGet(LS_KEYS.filiais);
-  const cachedStock = lsGet(LS_KEYS.stock);
-  const cachedPrices = lsGet(LS_KEYS.prices);
-
-  S.filiais = cachedFiliais || [];
-  S.products = (cachedProducts || []).filter(p => p.ean && p.ean.toString().trim());
-  if (cachedProducts) buildIndexes();
-  if (cachedStock) {
-    S.stockMap = {};
-    for (const s of cachedStock) S.stockMap[s.filial + '_' + s.idproduto] = s.qtd;
+  // ponytail: server-side cache, no localStorage for data
+  const cacheStatus = await apiGet('cache/status');
+  if (cacheStatus.ready) {
+    loadAllData().then(() => {
+      autoLoginIfSessionSaved();
+    });
+  } else if (cacheStatus.loading) {
+    loadAllData().then(() => {
+      autoLoginIfSessionSaved();
+    });
+  } else {
+    // Cache never loaded, trigger reload
+    await fetch('/api/cache/reload', { method: 'POST' });
+    loadAllData().then(() => {
+      autoLoginIfSessionSaved();
+    });
   }
-  if (cachedPrices) {
-    S.pricesMap = {};
-    for (const p of cachedPrices) { if (!S.pricesMap[p.idproduto]) S.pricesMap[p.idproduto] = p; }
-  }
-  S.dataReady = !!cachedProducts && !!cachedFiliais;
 
-  $('#cache-status').textContent = fmtNum(S.products.length) + ' produtos' + (S.dataReady ? ' (cache)' : '');
-
-  if (S.filiais.length === 0) { try { await loadAllFiliais(); } catch {} }
   popRegFilial();
-
-  // Restore session from previous login
-  const prevState = lsGet(LS_KEYS.state);
-  if (prevState && prevState.email) {
-    S.user = { name: prevState.name, email: prevState.email, filialId: prevState.filialId, filialNome: '' };
-    const filial = S.filiais.find(f => f.id === prevState.filialId);
-    if (filial) S.user.filialNome = filial.fantasia || filial.razaocial;
-    if (S.dataReady) startAuditInternal();
-    else loadAllData().then(() => startAuditInternal());
-  }
 
   // Event: auth tabs
   $$('.auth-tab').forEach(btn => {
@@ -1147,8 +1196,8 @@ async function init() {
 
   // Event: reload data
   $('#btn-reload-data').addEventListener('click', () => {
-    if (confirm('Isso irá recarregar todos os dados da API. Continuar?')) {
-      loadAllData().then(() => {
+    if (confirm('Isso irá recarregar todos os dados da API no servidor. Continuar?')) {
+      reloadServerCache().then(() => {
         if (S.session) updateAuditUI();
         if (S.view === 'dashboard') renderDashboard();
       });
@@ -1180,6 +1229,7 @@ async function init() {
   // Event: report filter
   $('#report-search').addEventListener('input', debounce(() => loadReport(), 400));
   $('#report-show-inactive').addEventListener('change', loadReport);
+  $('#report-sort').addEventListener('change', loadReport);
 
   // Event: export
   $('#btn-export-csv').addEventListener('click', exportCSV);
