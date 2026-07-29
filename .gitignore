@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+users.json
+cache_data.json
+audit_sessions.json
+server.log
+.claude/
+.claude-flow/
+.playwright-mcp/
+.mcp.json
+CLAUDE.md

@@ -13,7 +13,12 @@ CORS(app)
 API_BASE = "https://api.i9logic.net/v1"
 CLIENT_ID = "AA5F52211F2B19AE605A245C"
 TOKEN = "c87407fcbe574263ce9477b2a61421a4837781cce3012d2c3bb4f3cf1070486f"
-USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+os.makedirs(DATA_DIR, exist_ok=True)
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+CACHE_FILE = os.path.join(DATA_DIR, "cache_data.json")
+AUDIT_FILE = os.path.join(DATA_DIR, "audit_sessions.json")
+_audit_lock = threading.Lock()
 
 HEADERS = {
     "X-Client-Id": CLIENT_ID,
@@ -34,7 +39,7 @@ def _rate_limit():
 
 
 # ponytail: server-side cache, single source for all users
-CACHE = {"filiais": [], "produtos": [], "estoques": [], "precos": [], "ready": False, "loading": False}
+CACHE = {"filiais": [], "produtos": [], "estoques": [], "precos": [], "ready": False, "loading": False, "progress": {}}
 
 
 def _paginated_fetch(entity, filter_fn=None, per_page=200):
@@ -46,7 +51,7 @@ def _paginated_fetch(entity, filter_fn=None, per_page=200):
                           params={"page": page, "per_page": per_page}, timeout=45)
         body = resp.json()
         if not body.get("ok"):
-            break
+            raise RuntimeError(f"Falha ao buscar '{entity}' pagina {page}: {body.get('error') or resp.status_code}")
         data = body.get("data", [])
         if filter_fn:
             data = [d for d in data if filter_fn(d)]
@@ -59,22 +64,69 @@ def _paginated_fetch(entity, filter_fn=None, per_page=200):
 
 
 def refresh_cache():
+    """So confirma (ready + grava em disco) apos as 4 entidades sincronizarem por completo.
+    Uma falha parcial (ex: rate limit) mantem o cache anterior intacto em vez de gravar dados incompletos.
+    'progress' vai sendo preenchido entidade-a-entidade so para a barra de progresso do front."""
     CACHE["loading"] = True
+    CACHE["progress"] = {}
     try:
-        CACHE["filiais"] = _paginated_fetch("filiais", per_page=100)
-        CACHE["produtos"] = _paginated_fetch("produtos", filter_fn=lambda p: p.get("ean") and str(p["ean"]).strip())
-        CACHE["estoques"] = _paginated_fetch("produtos_estoques")
-        CACHE["precos"] = _paginated_fetch("precos")
+        filiais = _paginated_fetch("filiais", per_page=100)
+        CACHE["progress"]["filiais"] = len(filiais)
+        produtos = _paginated_fetch("produtos", filter_fn=lambda p: p.get("ean") and str(p["ean"]).strip())
+        CACHE["progress"]["produtos"] = len(produtos)
+        estoques = _paginated_fetch("produtos_estoques")
+        CACHE["progress"]["estoques"] = len(estoques)
+        precos = _paginated_fetch("precos")
+        CACHE["progress"]["precos"] = len(precos)
+
+        CACHE["filiais"] = filiais
+        CACHE["produtos"] = produtos
+        CACHE["estoques"] = estoques
+        CACHE["precos"] = precos
         CACHE["ready"] = True
+        CACHE["synced_at"] = datetime.now().isoformat()
+        _save_cache_to_disk()
+    except Exception as exc:
+        print(f"[cache] Falha ao sincronizar: {exc}. Cache anterior mantido.")
     finally:
         CACHE["loading"] = False
+        CACHE["progress"] = {}
+
+
+def _save_cache_to_disk():
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump({
+            "filiais": CACHE["filiais"], "produtos": CACHE["produtos"],
+            "estoques": CACHE["estoques"], "precos": CACHE["precos"],
+            "synced_at": CACHE.get("synced_at"),
+        }, f, ensure_ascii=False)
+
+
+def _load_cache_from_disk():
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    CACHE["filiais"] = data.get("filiais", [])
+    CACHE["produtos"] = data.get("produtos", [])
+    CACHE["estoques"] = data.get("estoques", [])
+    CACHE["precos"] = data.get("precos", [])
+    CACHE["synced_at"] = data.get("synced_at")
+    CACHE["ready"] = bool(CACHE["produtos"])
+    return CACHE["ready"]
 
 
 @app.route("/api/cache/status")
 def cache_status():
+    if CACHE["loading"] and CACHE.get("progress"):
+        progress = CACHE["progress"]
+        counts = {k: progress.get(k, 0) for k in ("filiais", "produtos", "estoques", "precos")}
+    else:
+        counts = {"filiais": len(CACHE["filiais"]), "produtos": len(CACHE["produtos"]),
+                   "estoques": len(CACHE["estoques"]), "precos": len(CACHE["precos"])}
     return jsonify({"ok": True, "ready": CACHE["ready"], "loading": CACHE["loading"],
-                    "counts": {"filiais": len(CACHE["filiais"]), "produtos": len(CACHE["produtos"]),
-                               "estoques": len(CACHE["estoques"]), "precos": len(CACHE["precos"])}})
+                    "synced_at": CACHE.get("synced_at"), "counts": counts})
 
 
 @app.route("/api/cache/<entity>")
@@ -90,6 +142,158 @@ def cache_reload():
         return jsonify({"ok": False, "error": "Cache ja esta sendo carregado"}), 409
     threading.Thread(target=refresh_cache, daemon=True).start()
     return jsonify({"ok": True, "message": "Recarregando cache em background"})
+
+
+DEBUG_ENTITIES = ["filiais", "produtos", "produtos_estoques", "precos", "pedidos_produtos", "clientes", "usuarios"]
+
+
+@app.route("/api/debug/test-connection")
+def debug_test_connection():
+    results = []
+    for entity in DEBUG_ENTITIES:
+        _rate_limit()
+        start = time.time()
+        try:
+            resp = requests.get(f"{API_BASE}/{entity}", headers=HEADERS,
+                              params={"page": 1, "per_page": 1}, timeout=20)
+            elapsed = round(time.time() - start, 2)
+            body = resp.json()
+            data = body.get("data", [])
+            sample = data[0] if data else {}
+            results.append({
+                "entity": entity, "status": resp.status_code, "ok": bool(body.get("ok")),
+                "total": body.get("total"), "elapsed_s": elapsed,
+                "campos": sorted(sample.keys()),
+            })
+        except Exception as exc:
+            results.append({"entity": entity, "status": None, "ok": False, "error": str(exc)})
+    return jsonify({"ok": True, "results": results})
+
+
+@app.route("/api/debug/pull200")
+def debug_pull200():
+    """Amostra do CACHE ja sincronizado (uma unica vez, compartilhado por todos os usuarios).
+    Nao faz nenhuma chamada nova a API — usa exatamente os mesmos dados que /api/cache/produtos serve."""
+    start = time.time()
+    per_page = request.args.get("per_page", default=200, type=int)
+
+    if not CACHE.get("ready"):
+        return jsonify({"ok": False, "error": "Cache ainda nao sincronizado. Aguarde a sincronizacao inicial."}), 409
+
+    produtos = CACHE.get("produtos", [])[:per_page]
+    ids = {p["id"] for p in produtos}
+
+    estoque_by_produto = {}
+    for e in CACHE.get("estoques", []):
+        if e.get("idproduto") in ids:
+            estoque_by_produto.setdefault(e["idproduto"], []).append(e)
+
+    precos_by_produto = {}
+    for pr in CACHE.get("precos", []):
+        if pr.get("produto") in ids:
+            precos_by_produto.setdefault(pr["produto"], []).append(pr)
+
+    enriched = [{
+        **p,
+        "_estoques": estoque_by_produto.get(p["id"], []),
+        "_estoque_total": sum(e.get("qtd") or 0 for e in estoque_by_produto.get(p["id"], [])),
+        "_precos": precos_by_produto.get(p["id"], []),
+    } for p in produtos]
+
+    return jsonify({
+        "ok": True,
+        "total_no_cache": len(CACHE.get("produtos", [])),
+        "quantidade_puxada": len(enriched),
+        "tempo_segundos": round(time.time() - start, 2),
+        "sincronizado_em": CACHE.get("synced_at"),
+        "cache_estoques_disponivel": len(CACHE.get("estoques", [])) > 0,
+        "cache_precos_disponivel": len(CACHE.get("precos", [])) > 0,
+        "produtos": enriched,
+    })
+
+
+def _load_audit():
+    try:
+        with open(AUDIT_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_audit(sessions):
+    with open(AUDIT_FILE, "w", encoding="utf-8") as f:
+        json.dump(sessions, f, ensure_ascii=False)
+
+
+@app.route("/api/audit/sessions", methods=["GET"])
+def audit_sessions():
+    sessions = _load_audit()
+    return jsonify({"ok": True, "sessions": list(sessions.values())})
+
+
+@app.route("/api/audit/session/start", methods=["POST"])
+def audit_session_start():
+    data = request.get_json(silent=True) or {}
+    filial_id = data.get("filialId")
+    filial_nome = data.get("filialNome") or ""
+    user_email = (data.get("userEmail") or "").strip().lower()
+    user_name = (data.get("userName") or "").strip()
+    if filial_id is None or not user_email:
+        return jsonify({"ok": False, "error": "filialId e userEmail sao obrigatorios."}), 400
+    with _audit_lock:
+        sessions = _load_audit()
+        hoje = date.today().isoformat()
+        session_id = f"audit_{filial_id}_{hoje}_{int(time.time() * 1000)}"
+        session = {
+            "id": session_id, "userEmail": user_email, "userName": user_name,
+            "filialId": filial_id, "filialNome": filial_nome, "data": hoje,
+            "inicio": datetime.now().strftime("%H:%M:%S"), "fim": "",
+            "encontrados": {},
+        }
+        sessions[session_id] = session
+        _save_audit(sessions)
+    return jsonify({"ok": True, "session": session}), 201
+
+
+@app.route("/api/audit/scan", methods=["POST"])
+def audit_scan():
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("sessionId")
+    product_id = data.get("productId")
+    ean = data.get("ean") or ""
+    descricao = data.get("descricao") or ""
+    if not session_id or product_id is None:
+        return jsonify({"ok": False, "error": "sessionId e productId sao obrigatorios."}), 400
+    with _audit_lock:
+        sessions = _load_audit()
+        session = sessions.get(session_id)
+        if not session:
+            return jsonify({"ok": False, "error": "Sessao de auditoria nao encontrada."}), 404
+        pid = str(product_id)
+        is_dup = pid in session["encontrados"]
+        if not is_dup:
+            session["encontrados"][pid] = {
+                "ean": ean, "descricao": descricao,
+                "scannedAt": datetime.now().strftime("%H:%M:%S"),
+            }
+            _save_audit(sessions)
+    return jsonify({"ok": True, "dup": is_dup})
+
+
+@app.route("/api/audit/session/finish", methods=["POST"])
+def audit_session_finish():
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("sessionId")
+    if not session_id:
+        return jsonify({"ok": False, "error": "sessionId e obrigatorio."}), 400
+    with _audit_lock:
+        sessions = _load_audit()
+        session = sessions.get(session_id)
+        if not session:
+            return jsonify({"ok": False, "error": "Sessao nao encontrada."}), 404
+        session["fim"] = datetime.now().strftime("%H:%M:%S")
+        _save_audit(sessions)
+    return jsonify({"ok": True, "session": session})
 
 
 def _load_users():
@@ -215,5 +419,9 @@ def index():
 
 if __name__ == "__main__":
     print("Servidor iniciado em http://localhost:5000")
-    threading.Thread(target=refresh_cache, daemon=True).start()
+    if _load_cache_from_disk():
+        print(f"Cache carregado do disco: {len(CACHE['produtos'])} produtos (sincronizado em {CACHE.get('synced_at')}). "
+              "Use 'Recarregar Dados' para resincronizar com a API.")
+    else:
+        threading.Thread(target=refresh_cache, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False)

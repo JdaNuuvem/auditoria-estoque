@@ -166,6 +166,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
       <button data-view="dashboard" class="active">Dashboard</button>
       <button data-view="audit">Auditoria</button>
       <button data-view="reports">Relatórios</button>
+      <button data-view="debug">Diagnóstico API</button>
       <button class="btn-s btn-sm" id="btn-reload-data">Recarregar Dados</button>
     </nav>
   </header>
@@ -240,6 +241,22 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
       <div style="overflow-x:auto"><table class="report-table" id="report-table"><thead></thead><tbody></tbody></table></div>
       <div id="report-pagination" style="display:flex;gap:8px;justify-content:center;padding:16px"></div>
     </div>
+    <!-- DEBUG -->
+    <div id="debug-view" style="display:none">
+      <div class="card" style="margin-bottom:16px">
+        <h3 style="margin-bottom:12px">Conexão com a API (api.i9logic.net)</h3>
+        <button class="btn-p btn-sm" id="btn-test-connection">Testar Conexão</button>
+        <div id="debug-connection-result" style="margin-top:12px;display:flex;flex-direction:column;gap:6px"></div>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <h3>Produtos Sincronizados (compartilhado entre todos os usuários)</h3>
+          <button class="btn-s btn-sm" id="btn-pull-200">Atualizar Amostra</button>
+        </div>
+        <div id="debug-pull-status" style="font-size:.85rem;color:var(--muted);margin-bottom:8px"></div>
+        <div style="overflow-x:auto;max-height:70vh"><table class="report-table" id="debug-table"><thead></thead><tbody></tbody></table></div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -266,7 +283,6 @@ const LS_KEYS = {
   filiais: 'audit_filiais',
   stock: 'audit_stock',
   prices: 'audit_prices',
-  sessions: 'audit_sessions',
   state: 'audit_state',
 };
 
@@ -418,20 +434,24 @@ function buildIndexes() {
   }
 }
 
-/* ===== AUDIT SESSION ===== */
-function createSession() {
-  const hoje = new Date().toISOString().slice(0, 10);
-  return {
-    id: 'audit_' + S.user.filialId + '_' + hoje + '_' + Date.now(),
-    userEmail: S.user.email,
-    userName: S.user.name,
-    filialId: S.user.filialId,
-    filialNome: S.user.filialNome,
-    data: hoje,
-    inicio: new Date().toLocaleTimeString('pt-BR'),
-    fim: '',
-    encontrados: {},
-  };
+/* ===== AUDIT SESSION (persistido no servidor, compartilhado entre todos os usuários) ===== */
+async function createSession() {
+  try {
+    const resp = await fetch('/api/audit/session/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filialId: S.user.filialId, filialNome: S.user.filialNome,
+        userEmail: S.user.email, userName: S.user.name,
+      }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro ao iniciar auditoria: ' + r.error, 'err'); return null; }
+    return r.session;
+  } catch (e) {
+    toast('Erro ao iniciar auditoria: sem conexão com o servidor.', 'err');
+    return null;
+  }
 }
 
 function markFound(productId, ean, descricao) {
@@ -444,27 +464,39 @@ function markFound(productId, ean, descricao) {
     ean, descricao,
     scannedAt: new Date().toLocaleTimeString('pt-BR'),
   };
-  saveSession();
+  syncScanToServer(productId, ean, descricao);
   return true;
 }
 
-function saveSession() {
-  let sessions = lsGet(LS_KEYS.sessions) || [];
-  const idx = sessions.findIndex(s => s.id === S.session.id);
-  if (idx >= 0) sessions[idx] = S.session;
-  else sessions.push(S.session);
-  lsSet(LS_KEYS.sessions, sessions);
-  S.allSessions = sessions;
+function syncScanToServer(productId, ean, descricao) {
+  fetch('/api/audit/scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: S.session.id, productId, ean, descricao }),
+  }).then(r => r.json()).then(r => {
+    if (!r.ok) toast('Aviso: falha ao salvar bipagem no servidor — ' + r.error, 'warn');
+  }).catch(() => toast('Aviso: sem conexão para salvar bipagem no servidor.', 'warn'));
 }
 
-function finalizeSession() {
+async function finalizeSession() {
   if (!S.session) return;
   S.session.fim = new Date().toLocaleTimeString('pt-BR');
-  saveSession();
+  try {
+    await fetch('/api/audit/session/finish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: S.session.id }),
+    });
+  } catch (e) { /* best-effort */ }
 }
 
-function loadSessions() {
-  S.allSessions = lsGet(LS_KEYS.sessions) || [];
+async function loadSessions() {
+  try {
+    const r = await apiGet('audit/sessions');
+    S.allSessions = r.sessions || [];
+  } catch (e) {
+    S.allSessions = [];
+  }
 }
 
 /* ===== PRODUCT LOOKUP ===== */
@@ -1065,14 +1097,84 @@ function exportCSV() {
 }
 
 /* ===== VIEW SWITCH ===== */
-function switchView(view) {
+async function switchView(view) {
   S.view = view;
-  ['loading-view', 'dashboard-view', 'audit-view', 'reports-view'].forEach(id => $(`#${id}`).style.display = 'none');
-  if (view === 'dashboard') { $('#dashboard-view').style.display = 'block'; renderDashboard(); }
+  ['loading-view', 'dashboard-view', 'audit-view', 'reports-view', 'debug-view'].forEach(id => $(`#${id}`).style.display = 'none');
+  if (view === 'dashboard') {
+    $('#dashboard-view').style.display = 'block';
+    renderDashboard();
+    await loadSessions(); // busca progresso atualizado de todos os usuários no servidor
+    if (S.view === 'dashboard') renderDashboard();
+  }
   else if (view === 'audit') { $('#audit-view').style.display = 'block'; updateAuditUI(); setTimeout(() => $('#scan-input').focus(), 200); }
   else if (view === 'reports') { $('#reports-view').style.display = 'block'; renderReports(); }
+  else if (view === 'debug') { $('#debug-view').style.display = 'block'; pullSyncedProducts(); }
   else if (view === 'loading') { $('#loading-view').style.display = 'flex'; }
   $$('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+}
+
+/* ===== DEBUG / DIAGNÓSTICO API ===== */
+async function testConnection() {
+  const el = $('#debug-connection-result');
+  el.innerHTML = '<span style="color:var(--muted)">Testando conexão com api.i9logic.net...</span>';
+  try {
+    const r = await apiGet('debug/test-connection');
+    el.innerHTML = r.results.map(e => {
+      const okIcon = e.ok ? '✅' : '❌';
+      const info = e.ok
+        ? `total=${fmtNum(e.total)} | ${e.elapsed_s}s | ${e.campos.length} campos: ${e.campos.join(', ')}`
+        : `erro: ${e.error || ('HTTP ' + e.status)}`;
+      return `<div class="prod-field" style="flex-direction:column;align-items:flex-start;gap:2px">
+        <span class="fld">${okIcon} ${e.entity}</span>
+        <span class="val" style="text-align:left;font-size:.75rem;color:var(--muted)">${info}</span>
+      </div>`;
+    }).join('');
+    toast('Teste de conexão concluído.', 'ok');
+  } catch (e) {
+    el.innerHTML = '<span style="color:var(--d600)">Erro ao testar conexão: ' + e.message + '</span>';
+    toast('Erro ao testar conexão.', 'err');
+  }
+}
+
+let debugProducts = [];
+
+// Lê a amostra direto do cache já sincronizado no servidor (1 única sincronização,
+// compartilhada por todos os usuários — nenhuma chamada nova à API é feita aqui).
+async function pullSyncedProducts() {
+  const statusEl = $('#debug-pull-status');
+  statusEl.textContent = 'Carregando amostra do cache sincronizado...';
+  try {
+    const r = await apiGet('debug/pull200');
+    if (!r.ok) throw new Error(r.error || 'Falha ao ler cache de produtos');
+    debugProducts = r.produtos;
+    const sinc = r.sincronizado_em ? new Date(r.sincronizado_em).toLocaleString('pt-BR') : '-';
+    statusEl.textContent = `${r.quantidade_puxada} de ${fmtNum(r.total_no_cache)} produtos sincronizados | última sincronização: ${sinc} | estoques: ${r.cache_estoques_disponivel ? 'ok' : 'vazio'} | preços: ${r.cache_precos_disponivel ? 'ok' : 'vazio'}`;
+    renderDebugTable(debugProducts);
+  } catch (e) {
+    statusEl.textContent = 'Erro: ' + e.message;
+  }
+}
+
+const DEBUG_TABLE_COLS = ['cest', 'codproduto', 'codprodutonofornecedor', 'descricao', 'ean', 'id', 'ncm'];
+
+function renderDebugTable(products) {
+  const thead = $('#debug-table thead');
+  const tbody = $('#debug-table tbody');
+  if (!products || !products.length) {
+    thead.innerHTML = '';
+    tbody.innerHTML = '<tr><td>Nenhum produto carregado ainda.</td></tr>';
+    return;
+  }
+  const cols = DEBUG_TABLE_COLS;
+
+  thead.innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
+  tbody.innerHTML = products.map(p => '<tr>' + cols.map(c => {
+    let v = p[c];
+    if (v && typeof v === 'object') v = JSON.stringify(v);
+    const text = (v === null || v === undefined) ? '' : String(v);
+    const safe = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `<td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${safe.replace(/"/g, '&quot;')}">${safe}</td>`;
+  }).join('') + '</tr>').join('');
 }
 
 /* ===== AUTH ===== */
@@ -1146,7 +1248,7 @@ function handleLogout() {
 /* ===== INIT ===== */
 async function init() {
   initBarcodeDetector();
-  loadSessions();
+  await loadSessions();
 
   // ponytail: server-side cache, no localStorage for data
   const cacheStatus = await apiGet('cache/status');
@@ -1234,6 +1336,10 @@ async function init() {
   // Event: export
   $('#btn-export-csv').addEventListener('click', exportCSV);
 
+  // Event: debug
+  $('#btn-test-connection').addEventListener('click', testConnection);
+  $('#btn-pull-200').addEventListener('click', pullSyncedProducts);
+
   // Event: print label
   $('#btn-print-label').addEventListener('click', () => {
     const searchVal = $('#manual-search').value.trim();
@@ -1249,9 +1355,10 @@ async function init() {
   initScannerInput();
 }
 
-function startAuditInternal(existingSession) {
+async function startAuditInternal(existingSession) {
   if (!S.user) return;
-  S.session = existingSession || createSession();
+  S.session = existingSession || await createSession();
+  if (!S.session) return; // falhou ao iniciar auditoria no servidor
   $('#hdr-filial').textContent = S.user.filialNome;
   $('#hdr-auditor').textContent = S.user.name + ' (' + S.user.email + ')';
   $('#setup-modal').style.display = 'none';
