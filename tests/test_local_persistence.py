@@ -17,6 +17,11 @@ import server
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "AUDIT_FILE", str(tmp_path / "audit_sessions.json"))
     monkeypatch.setattr(server, "CACHE_FILE", str(tmp_path / "cache_data.json"))
+    monkeypatch.setattr(server, "USERS_FILE", str(tmp_path / "users.json"))
+    server._save_users({
+        "a@a.com": {"name": "A", "email": "a@a.com", "filialId": 1},
+        "b@b.com": {"name": "B", "email": "b@b.com", "filialId": 2},
+    })
     server.app.config["TESTING"] = True
     return server.app.test_client()
 
@@ -24,6 +29,14 @@ def client(tmp_path, monkeypatch):
 def test_audit_session_start_requires_filial_e_email(client):
     resp = client.post("/api/audit/session/start", json={"userEmail": "a@a.com"})
     assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+
+
+def test_audit_session_start_rejeita_email_nao_cadastrado(client):
+    resp = client.post("/api/audit/session/start", json={
+        "filialId": 1, "filialNome": "Loja 1", "userEmail": "fantasma@a.com", "userName": "X",
+    })
+    assert resp.status_code == 403
     assert resp.get_json()["ok"] is False
 
 
@@ -93,6 +106,14 @@ def test_cache_save_e_load_do_disco_ida_e_volta(client):
 
 def test_cache_load_sem_arquivo_retorna_false(client):
     assert server._load_cache_from_disk() is False
+
+
+def test_proxy_generico_da_api_nao_existe_mais(client):
+    """Regressao de seguranca: o proxy aberto /api/<path> expunha toda a API i9logic
+    (inclusive escrita) sem nenhuma autenticacao. Nao pode voltar a existir."""
+    for method in ("get", "post", "put", "patch", "delete"):
+        resp = getattr(client, method)("/api/clientes")
+        assert resp.status_code == 404, f"{method.upper()} /api/clientes deveria ser 404 (rota removida)"
 
 
 def test_paginated_fetch_levanta_erro_em_resposta_nao_ok(monkeypatch):

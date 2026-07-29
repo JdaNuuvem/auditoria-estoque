@@ -4,15 +4,18 @@ import time
 import threading
 from datetime import date, datetime
 import requests
+from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
 API_BASE = "https://api.i9logic.net/v1"
-CLIENT_ID = "AA5F52211F2B19AE605A245C"
-TOKEN = "c87407fcbe574263ce9477b2a61421a4837781cce3012d2c3bb4f3cf1070486f"
+CLIENT_ID = os.environ["I9LOGIC_CLIENT_ID"]
+TOKEN = os.environ["I9LOGIC_TOKEN"]
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
@@ -240,6 +243,8 @@ def audit_session_start():
     user_name = (data.get("userName") or "").strip()
     if filial_id is None or not user_email:
         return jsonify({"ok": False, "error": "filialId e userEmail sao obrigatorios."}), 400
+    if user_email not in _load_users():
+        return jsonify({"ok": False, "error": "Usuario nao cadastrado."}), 403
     with _audit_lock:
         sessions = _load_audit()
         hoje = date.today().isoformat()
@@ -394,21 +399,6 @@ def product_sales(idproduto):
             stats["days_without_sale"] = (date.today() - last_dt).days
 
     return jsonify({"ok": True, "stats": stats})
-
-
-@app.route("/api/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
-def proxy(path):
-    url = f"{API_BASE}/{path}" if path else f"{API_BASE}"
-    params = request.args.to_dict()
-    _rate_limit()
-    try:
-        method = request.method.lower()
-        json_body = (request.get_json(silent=True) or {}) if method in ("post", "patch") else None
-        resp = requests.request(method, url, headers=HEADERS, params=params, json=json_body, timeout=45)
-        mime = resp.headers.get("Content-Type", "application/json")
-        return resp.content, resp.status_code, {"Content-Type": mime, "Access-Control-Allow-Origin": "*"}
-    except requests.exceptions.RequestException as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 502
 
 
 @app.route("/")
