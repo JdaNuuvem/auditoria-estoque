@@ -507,7 +507,13 @@ function syncScanToServer(productId, ean, descricao) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId: S.session.id, productId, ean, descricao }),
   }).then(r => r.json()).then(r => {
-    if (!r.ok) toast('Aviso: falha ao salvar bipagem no servidor — ' + r.error, 'warn');
+    if (!r.ok) { toast('Aviso: falha ao salvar bipagem no servidor — ' + r.error, 'warn'); return; }
+    if (r.entry) {
+      S.session.encontrados[productId] = r.entry;
+      updateScanStats();
+      if (S.auditPanel === 'existentes') updateAuditUI();
+      else if (S.auditPanel === 'contado') renderCountList();
+    }
   }).catch(() => toast('Aviso: sem conexão para salvar bipagem no servidor.', 'warn'));
 }
 
@@ -805,6 +811,7 @@ function printLabel(productId) {
 // exato — fonte unica usada pelos tres, para que nunca divirjam sobre como um
 // codigo bipado fisicamente deve ser resolvido.
 function dispatchScan(barcode) {
+  if (!barcode) return;
   const matches = findByEan(barcode);
   if (!matches || matches.length === 0) {
     showScanFeedback('❌ CÓDIGO NÃO ENCONTRADO NO CATÁLOGO', 'err');
@@ -1353,21 +1360,26 @@ async function handleAdminLogin() {
   clearAuthErrors();
   const password = $('#admin-password').value;
   if (!password) { showAuthError('admin', 'Digite a senha.'); return; }
-  const resp = await fetch('/api/admin/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password }),
-  });
-  const r = await resp.json();
-  if (!r.ok) { showAuthError('admin', r.error || 'Senha incorreta.'); return; }
-  S.isAdmin = true;
-  S.adminPassword = password;
-  $('#setup-modal').style.display = 'none';
-  $('#app').classList.add('active');
-  $('#hdr-filial').textContent = 'Admin';
-  $('#hdr-auditor').textContent = 'Administrador';
-  updateNavForRole();
-  switchView('bipadores');
+  try {
+    const resp = await fetch('/api/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { showAuthError('admin', r.error || 'Senha incorreta.'); return; }
+    S.isAdmin = true;
+    S.adminPassword = password;
+    if (!S.dataReady && S.dataReadyPromise) await S.dataReadyPromise;
+    $('#setup-modal').style.display = 'none';
+    $('#app').classList.add('active');
+    $('#hdr-filial').textContent = 'Admin';
+    $('#hdr-auditor').textContent = 'Administrador';
+    updateNavForRole();
+    switchView('bipadores');
+  } catch (e) {
+    showAuthError('admin', 'Erro ao efetuar login: sem conexão com o servidor.');
+  }
 }
 
 function updateNavForRole() {
@@ -1389,25 +1401,29 @@ function popAdminFilialSelect() {
 }
 
 async function loadBipadoresList() {
-  const r = await apiGet('auth/users');
-  const users = r.users || [];
-  const byFilial = {};
-  for (const u of users) {
-    if (!byFilial[u.filialId]) byFilial[u.filialId] = [];
-    byFilial[u.filialId].push(u);
+  try {
+    const r = await apiGet('auth/users');
+    const users = r.users || [];
+    const byFilial = {};
+    for (const u of users) {
+      if (!byFilial[u.filialId]) byFilial[u.filialId] = [];
+      byFilial[u.filialId].push(u);
+    }
+    $('#bipadores-list').innerHTML = S.filiais.map(f => {
+      const list = byFilial[f.id] || [];
+      return `<div class="card" style="margin-bottom:12px">
+        <h4 style="margin-bottom:8px">${f.fantasia || f.razaosocial} (${list.length} bipador${list.length !== 1 ? 'es' : ''})</h4>
+        ${list.length ? list.map(u => `
+          <div class="recent-row" style="cursor:default">
+            <span>${escapeHtml(u.name)}</span>
+            <span style="color:var(--muted);font-size:.75rem">${escapeHtml(u.email)}</span>
+          </div>
+        `).join('') : '<div class="empty" style="padding:8px">Nenhum bipador cadastrado.</div>'}
+      </div>`;
+    }).join('');
+  } catch (e) {
+    toast('Erro ao carregar lista de bipadores.', 'warn');
   }
-  $('#bipadores-list').innerHTML = S.filiais.map(f => {
-    const list = byFilial[f.id] || [];
-    return `<div class="card" style="margin-bottom:12px">
-      <h4 style="margin-bottom:8px">${f.fantasia || f.razaosocial} (${list.length} bipador${list.length !== 1 ? 'es' : ''})</h4>
-      ${list.length ? list.map(u => `
-        <div class="recent-row" style="cursor:default">
-          <span>${escapeHtml(u.name)}</span>
-          <span style="color:var(--muted);font-size:.75rem">${escapeHtml(u.email)}</span>
-        </div>
-      `).join('') : '<div class="empty" style="padding:8px">Nenhum bipador cadastrado.</div>'}
-    </div>`;
-  }).join('');
 }
 
 async function handleCreateBipador() {
@@ -1416,18 +1432,22 @@ async function handleCreateBipador() {
   const email = $('#bip-email').value.trim();
   const filialId = Number($('#bip-filial').value);
   if (!name || !email || !filialId) { showAuthError('bip', 'Preencha todos os campos.'); return; }
-  const resp = await fetch('/api/admin/bipadores', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ adminPassword: S.adminPassword, name, email, filialId }),
-  });
-  const r = await resp.json();
-  if (!r.ok) { showAuthError('bip', r.error); return; }
-  toast('Bipador cadastrado!', 'ok');
-  $('#bip-name').value = '';
-  $('#bip-email').value = '';
-  $('#bip-filial').value = '';
-  loadBipadoresList();
+  try {
+    const resp = await fetch('/api/admin/bipadores', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassword: S.adminPassword, name, email, filialId }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { showAuthError('bip', r.error); return; }
+    toast('Bipador cadastrado!', 'ok');
+    $('#bip-name').value = '';
+    $('#bip-email').value = '';
+    $('#bip-filial').value = '';
+    loadBipadoresList();
+  } catch (e) {
+    showAuthError('bip', 'Erro ao cadastrar bipador: sem conexão com o servidor.');
+  }
 }
 
 function onAuthSuccess(user) {
@@ -1459,6 +1479,9 @@ function handleLogout() {
   $('#hdr-auditor').textContent = '--';
   lsSet(LS_KEYS.state, null);
   if (S.cameraStream) stopCamera();
+  $('#admin-password').value = '';
+  $('#auth-admin').style.display = 'none';
+  $('#auth-login').style.display = 'flex';
 }
 
 /* ===== INIT ===== */
@@ -1469,17 +1492,20 @@ async function init() {
   // ponytail: server-side cache, no localStorage for data
   const cacheStatus = await apiGet('cache/status');
   if (cacheStatus.ready) {
-    loadAllData().then(() => {
+    S.dataReadyPromise = loadAllData();
+    S.dataReadyPromise.then(() => {
       autoLoginIfSessionSaved();
     });
   } else if (cacheStatus.loading) {
-    loadAllData().then(() => {
+    S.dataReadyPromise = loadAllData();
+    S.dataReadyPromise.then(() => {
       autoLoginIfSessionSaved();
     });
   } else {
     // Cache never loaded, trigger reload
     await fetch('/api/cache/reload', { method: 'POST' });
-    loadAllData().then(() => {
+    S.dataReadyPromise = loadAllData();
+    S.dataReadyPromise.then(() => {
       autoLoginIfSessionSaved();
     });
   }

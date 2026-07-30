@@ -5,6 +5,7 @@ server.AUDIT_FILE / server.CACHE_FILE para um arquivo temporario via monkeypatch
 """
 import sys
 import os
+from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -50,10 +51,17 @@ def test_audit_fluxo_completo_start_scan_dup(client):
     assert session["encontrados"] == {}
 
     r1 = client.post("/api/audit/scan", json={"sessionId": sid, "productId": 100, "ean": "123", "descricao": "X"})
-    assert r1.get_json() == {"ok": True, "dup": False}
+    body1 = r1.get_json()
+    assert body1["ok"] is True
+    assert body1["dup"] is False
+    assert body1["entry"]["ean"] == "123"
+    assert body1["entry"]["descricao"] == "X"
 
     r2 = client.post("/api/audit/scan", json={"sessionId": sid, "productId": 100, "ean": "123", "descricao": "X"})
-    assert r2.get_json() == {"ok": True, "dup": True}
+    body2 = r2.get_json()
+    assert body2["ok"] is True
+    assert body2["dup"] is True
+    assert body2["entry"]["ean"] == "123"
 
 
 def test_audit_session_start_reusa_sessao_da_mesma_loja_no_mesmo_dia(client):
@@ -354,3 +362,49 @@ def test_audit_count_rejeita_productId_nao_numerico(client):
     assert resp.get_json()["error"] == "productId deve ser um numero."
     saved = server._load_audit()[sid]
     assert "abc" not in saved["encontrados"]
+
+
+def test_audit_session_start_nao_reaproveita_sessao_de_ontem(client):
+    ontem = (date.today() - timedelta(days=1)).isoformat()
+    sessao_ontem = {
+        "id": "audit_1_ontem_000", "userEmail": "a@a.com", "userName": "A",
+        "filialId": 1, "filialNome": "Loja 1", "data": ontem,
+        "inicio": "08:00:00", "encontrados": {},
+    }
+    server._save_audit({sessao_ontem["id"]: sessao_ontem})
+
+    resp = client.post("/api/audit/session/start", json={
+        "filialId": 1, "filialNome": "Loja 1", "userEmail": "a@a.com", "userName": "A",
+    })
+    assert resp.status_code == 201
+    nova_sessao = resp.get_json()["session"]
+    assert nova_sessao["id"] != sessao_ontem["id"]
+    assert len(server._load_audit()) == 2
+
+
+def test_audit_session_start_reaproveitamento_preserva_produtos_bipados(client):
+    r1 = client.post("/api/audit/session/start", json={
+        "filialId": 1, "filialNome": "Loja 1", "userEmail": "a@a.com", "userName": "A",
+    })
+    assert r1.status_code == 201
+    sid = r1.get_json()["session"]["id"]
+
+    client.post("/api/audit/scan", json={"sessionId": sid, "productId": 100, "ean": "123", "descricao": "X"})
+
+    r2 = client.post("/api/audit/session/start", json={
+        "filialId": 1, "filialNome": "Loja 1", "userEmail": "a@a.com", "userName": "A",
+    })
+    assert r2.status_code == 200
+    sessao = r2.get_json()["session"]
+    assert "100" in sessao["encontrados"]
+
+
+def test_admin_login_senha_ausente_ou_vazia_e_rejeitada(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp1 = client.post("/api/admin/login", json={})
+    assert resp1.status_code == 401
+    assert resp1.get_json()["ok"] is False
+
+    resp2 = client.post("/api/admin/login", json={"password": ""})
+    assert resp2.status_code == 401
+    assert resp2.get_json()["ok"] is False

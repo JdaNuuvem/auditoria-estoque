@@ -18,6 +18,18 @@ API_BASE = "https://api.i9logic.net/v1"
 CLIENT_ID = os.environ["I9LOGIC_CLIENT_ID"]
 TOKEN = os.environ["I9LOGIC_TOKEN"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
+if len(ADMIN_PASSWORD) < 8:
+    raise RuntimeError("ADMIN_PASSWORD ausente ou muito curta (minimo 8 caracteres).")
+
+
+def _admin_password_ok(candidate):
+    return hmac.compare_digest(str(candidate or "").encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
+
+
+_admin_login_attempts = {}
+ADMIN_LOGIN_MAX_ATTEMPTS = 10
+ADMIN_LOGIN_WINDOW_SECONDS = 300
+
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
@@ -291,7 +303,7 @@ def audit_scan():
                 "scannedAt": datetime.now().strftime("%H:%M:%S"),
             }
             _save_audit(sessions)
-    return jsonify({"ok": True, "dup": is_dup})
+    return jsonify({"ok": True, "dup": is_dup, "entry": session["encontrados"][pid]})
 
 
 def _estoque_sistema(product_id, filial_id):
@@ -370,10 +382,20 @@ def _save_users(users):
 
 @app.route("/api/admin/login", methods=["POST"])
 def admin_login():
+    ip = request.remote_addr or "unknown"
+    now = time.time()
+    count, window_start = _admin_login_attempts.get(ip, (0, now))
+    if now - window_start > ADMIN_LOGIN_WINDOW_SECONDS:
+        count, window_start = 0, now
+    if count >= ADMIN_LOGIN_MAX_ATTEMPTS:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+
     data = request.get_json(silent=True) or {}
     password = data.get("password") or ""
-    if not hmac.compare_digest(password, ADMIN_PASSWORD):
+    if not _admin_password_ok(password):
+        _admin_login_attempts[ip] = (count + 1, window_start)
         return jsonify({"ok": False, "error": "Senha incorreta."}), 401
+    _admin_login_attempts.pop(ip, None)
     return jsonify({"ok": True})
 
 
@@ -381,7 +403,7 @@ def admin_login():
 def admin_create_bipador():
     data = request.get_json(silent=True) or {}
     admin_password = data.get("adminPassword") or ""
-    if not hmac.compare_digest(admin_password, ADMIN_PASSWORD):
+    if not _admin_password_ok(admin_password):
         return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
