@@ -127,3 +127,116 @@ def test_paginated_fetch_levanta_erro_em_resposta_nao_ok(monkeypatch):
 
     with pytest.raises(RuntimeError):
         server._paginated_fetch("produtos")
+
+
+def _start_session(client, filial_id=1):
+    r = client.post("/api/audit/session/start", json={
+        "filialId": filial_id, "filialNome": "Loja 1", "userEmail": "a@a.com", "userName": "A",
+    })
+    return r.get_json()["session"]["id"]
+
+
+def test_audit_count_requires_session_and_product(client):
+    resp = client.post("/api/audit/count", json={"delta": 1})
+    assert resp.status_code == 400
+
+
+def test_audit_count_exige_delta_ou_qtd(client):
+    sid = _start_session(client)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X",
+    })
+    assert resp.status_code == 400
+
+
+def test_audit_count_rejeita_delta_e_qtd_juntos(client):
+    sid = _start_session(client)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": 1, "qtd": 5,
+    })
+    assert resp.status_code == 400
+
+
+def test_audit_count_delta_invalido_retorna_400(client):
+    sid = _start_session(client)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": 5,
+    })
+    assert resp.status_code == 400
+
+
+def test_audit_count_qtd_negativo_retorna_400(client):
+    sid = _start_session(client)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "qtd": -3,
+    })
+    assert resp.status_code == 400
+
+
+def test_audit_count_sessao_inexistente_retorna_404(client):
+    resp = client.post("/api/audit/count", json={
+        "sessionId": "nao-existe", "productId": 100, "delta": 1,
+    })
+    assert resp.status_code == 404
+
+
+def test_audit_count_increment_cria_entrada_nova(client):
+    sid = _start_session(client)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": 1,
+    })
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["qtd"] == 1
+    saved = server._load_audit()[sid]
+    assert saved["encontrados"]["100"]["qtd"] == 1
+
+
+def test_audit_count_incrementa_e_decrementa(client):
+    sid = _start_session(client)
+    for _ in range(3):
+        client.post("/api/audit/count", json={
+            "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": 1,
+        })
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": -1,
+    })
+    assert resp.get_json()["qtd"] == 2
+
+
+def test_audit_count_delta_nao_desce_abaixo_de_zero(client):
+    sid = _start_session(client)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": -1,
+    })
+    assert resp.get_json()["qtd"] == 0
+
+
+def test_audit_count_qtd_substitui_em_vez_de_somar(client):
+    sid = _start_session(client)
+    client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": 1,
+    })
+    client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": 1,
+    })
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "qtd": 15,
+    })
+    assert resp.get_json()["qtd"] == 15
+
+
+def test_audit_count_calcula_qtd_sistema_e_diferenca(client):
+    server.CACHE["estoques"] = [
+        {"idproduto": 100, "filial": 1, "qtd": 5, "tipoestoque": 1},
+        {"idproduto": 100, "filial": 1, "qtd": 3, "tipoestoque": 2},
+        {"idproduto": 100, "filial": 2, "qtd": 999, "tipoestoque": 1},
+    ]
+    sid = _start_session(client, filial_id=1)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "qtd": 6,
+    })
+    body = resp.get_json()
+    assert body["qtdSistema"] == 8
+    assert body["diferenca"] == -2
+    server.CACHE["estoques"] = []

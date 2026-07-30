@@ -285,6 +285,62 @@ def audit_scan():
     return jsonify({"ok": True, "dup": is_dup})
 
 
+def _estoque_sistema(product_id, filial_id):
+    total = 0
+    for e in CACHE.get("estoques", []):
+        if e.get("idproduto") == product_id and e.get("filial") == filial_id:
+            total += e.get("qtd") or 0
+    return total
+
+
+@app.route("/api/audit/count", methods=["POST"])
+def audit_count():
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("sessionId")
+    product_id = data.get("productId")
+    ean = data.get("ean") or ""
+    descricao = data.get("descricao") or ""
+    has_delta = "delta" in data
+    has_qtd = "qtd" in data
+
+    if not session_id or product_id is None:
+        return jsonify({"ok": False, "error": "sessionId e productId sao obrigatorios."}), 400
+    if has_delta and has_qtd:
+        return jsonify({"ok": False, "error": "Informe apenas um de delta ou qtd, nao os dois."}), 400
+    if not has_delta and not has_qtd:
+        return jsonify({"ok": False, "error": "Informe delta ou qtd."}), 400
+    if has_delta and data.get("delta") not in (1, -1):
+        return jsonify({"ok": False, "error": "delta deve ser 1 ou -1."}), 400
+    if has_qtd and (not isinstance(data.get("qtd"), int) or data.get("qtd") < 0):
+        return jsonify({"ok": False, "error": "qtd deve ser um inteiro >= 0."}), 400
+
+    with _audit_lock:
+        sessions = _load_audit()
+        session = sessions.get(session_id)
+        if not session:
+            return jsonify({"ok": False, "error": "Sessao de auditoria nao encontrada."}), 404
+        pid = str(product_id)
+        entry = session["encontrados"].get(pid)
+        if not entry:
+            entry = session["encontrados"][pid] = {
+                "ean": ean, "descricao": descricao,
+                "scannedAt": datetime.now().strftime("%H:%M:%S"), "qtd": 0,
+            }
+        if has_qtd:
+            entry["qtd"] = data["qtd"]
+        else:
+            entry["qtd"] = max(0, entry.get("qtd", 0) + data["delta"])
+        _save_audit(sessions)
+        qtd_sistema = _estoque_sistema(int(product_id), session["filialId"])
+
+    return jsonify({
+        "ok": True,
+        "qtd": entry["qtd"],
+        "qtdSistema": qtd_sistema,
+        "diferenca": entry["qtd"] - qtd_sistema,
+    })
+
+
 @app.route("/api/audit/session/finish", methods=["POST"])
 def audit_session_finish():
     data = request.get_json(silent=True) or {}
