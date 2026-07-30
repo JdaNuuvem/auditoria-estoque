@@ -19,6 +19,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "AUDIT_FILE", str(tmp_path / "audit_sessions.json"))
     monkeypatch.setattr(server, "CACHE_FILE", str(tmp_path / "cache_data.json"))
     monkeypatch.setattr(server, "USERS_FILE", str(tmp_path / "users.json"))
+    monkeypatch.setattr(server, "_admin_login_attempts", {})
+    monkeypatch.setattr(server, "_bipador_login_attempts", {})
     server._save_users({
         "a@a.com": {"name": "A", "email": "a@a.com", "filialId": 1},
         "b@b.com": {"name": "B", "email": "b@b.com", "filialId": 2},
@@ -263,6 +265,21 @@ def test_reset_password_rejeita_bipador_inexistente(client, monkeypatch):
         "adminPassword": "segredo123", "email": "fantasma@x.com", "password": "senhaNova1",
     })
     assert resp.status_code == 404
+
+
+def test_reset_password_rejeita_senha_curta(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Nina", "email": "nina@x.com",
+        "password": "senhaOriginal", "filialId": 3,
+    })
+    resp = client.post("/api/admin/bipadores/reset-password", json={
+        "adminPassword": "segredo123", "email": "nina@x.com", "password": "123",
+    })
+    assert resp.status_code == 400
+
+    old_login = client.post("/api/auth/login", json={"email": "nina@x.com", "password": "senhaOriginal"})
+    assert old_login.status_code == 200
 
 
 def test_auth_register_nao_existe_mais(client):

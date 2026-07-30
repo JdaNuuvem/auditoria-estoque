@@ -27,9 +27,27 @@ def _admin_password_ok(candidate):
     return hmac.compare_digest(str(candidate or "").encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
 
 
-_admin_login_attempts = {}
 ADMIN_LOGIN_MAX_ATTEMPTS = 10
 ADMIN_LOGIN_WINDOW_SECONDS = 300
+_admin_login_attempts = {}
+_bipador_login_attempts = {}
+# Hash "dummy" comparado quando o usuario/senha nao existe, para o login de
+# bipador levar sempre o mesmo tempo (evita descobrir contas validas por
+# temporizacao mesmo com a mensagem de erro generica).
+_DUMMY_PASSWORD_HASH = generate_password_hash("tempo-constante-nao-e-uma-senha-real")
+
+
+def _rate_limited(bucket, key):
+    now = time.time()
+    count, window_start = bucket.get(key, (0, now))
+    if now - window_start > ADMIN_LOGIN_WINDOW_SECONDS:
+        count, window_start = 0, now
+    return count >= ADMIN_LOGIN_MAX_ATTEMPTS, count, window_start
+
+
+def _record_failed_attempt(bucket, key, count, window_start):
+    bucket[key] = (count + 1, window_start)
+
 
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -37,6 +55,7 @@ USERS_FILE = os.path.join(DATA_DIR, "users.json")
 CACHE_FILE = os.path.join(DATA_DIR, "cache_data.json")
 AUDIT_FILE = os.path.join(DATA_DIR, "audit_sessions.json")
 _audit_lock = threading.Lock()
+_users_lock = threading.Lock()
 
 HEADERS = {
     "X-Client-Id": CLIENT_ID,
@@ -384,17 +403,14 @@ def _save_users(users):
 @app.route("/api/admin/login", methods=["POST"])
 def admin_login():
     ip = request.remote_addr or "unknown"
-    now = time.time()
-    count, window_start = _admin_login_attempts.get(ip, (0, now))
-    if now - window_start > ADMIN_LOGIN_WINDOW_SECONDS:
-        count, window_start = 0, now
-    if count >= ADMIN_LOGIN_MAX_ATTEMPTS:
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
         return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
 
     data = request.get_json(silent=True) or {}
     password = data.get("password") or ""
     if not _admin_password_ok(password):
-        _admin_login_attempts[ip] = (count + 1, window_start)
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
         return jsonify({"ok": False, "error": "Senha incorreta."}), 401
     _admin_login_attempts.pop(ip, None)
     return jsonify({"ok": True})
@@ -402,61 +418,84 @@ def admin_login():
 
 @app.route("/api/admin/bipadores", methods=["POST"])
 def admin_create_bipador():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+
     data = request.get_json(silent=True) or {}
     admin_password = data.get("adminPassword") or ""
     if not _admin_password_ok(admin_password):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
         return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
     filial_id = data.get("filialId")
-    password = data.get("password") or ""
-    if not name or not email or filial_id is None or not password:
+    password = data.get("password")
+    if not name or not email or filial_id is None or not isinstance(password, str) or not password:
         return jsonify({"ok": False, "error": "Nome, email, senha e loja são obrigatórios."}), 400
     if len(password) < 6:
         return jsonify({"ok": False, "error": "Senha deve ter pelo menos 6 caracteres."}), 400
-    users = _load_users()
-    if email in users:
-        return jsonify({"ok": False, "error": "Email já cadastrado."}), 409
-    users[email] = {
-        "name": name, "email": email, "filialId": filial_id,
-        "password_hash": generate_password_hash(password),
-    }
-    _save_users(users)
-    user_public = {k: v for k, v in users[email].items() if k != "password_hash"}
+    with _users_lock:
+        users = _load_users()
+        if email in users:
+            return jsonify({"ok": False, "error": "Email já cadastrado."}), 409
+        users[email] = {
+            "name": name, "email": email, "filialId": filial_id,
+            "password_hash": generate_password_hash(password),
+        }
+        _save_users(users)
+        user_public = {k: v for k, v in users[email].items() if k != "password_hash"}
     return jsonify({"ok": True, "user": user_public}), 201
 
 
 @app.route("/api/admin/bipadores/reset-password", methods=["POST"])
 def admin_reset_bipador_password():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+
     data = request.get_json(silent=True) or {}
     admin_password = data.get("adminPassword") or ""
     if not _admin_password_ok(admin_password):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
         return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
     email = (data.get("email") or "").strip().lower()
-    password = data.get("password") or ""
-    if not email or not password:
+    password = data.get("password")
+    if not email or not isinstance(password, str) or not password:
         return jsonify({"ok": False, "error": "Email e senha são obrigatórios."}), 400
     if len(password) < 6:
         return jsonify({"ok": False, "error": "Senha deve ter pelo menos 6 caracteres."}), 400
-    users = _load_users()
-    if email not in users:
-        return jsonify({"ok": False, "error": "Bipador não encontrado."}), 404
-    users[email]["password_hash"] = generate_password_hash(password)
-    _save_users(users)
+    with _users_lock:
+        users = _load_users()
+        if email not in users:
+            return jsonify({"ok": False, "error": "Bipador não encontrado."}), 404
+        users[email]["password_hash"] = generate_password_hash(password)
+        _save_users(users)
     return jsonify({"ok": True})
 
 
 @app.route("/api/auth/login", methods=["POST"])
 def login():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_bipador_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
-    password = data.get("password") or ""
-    if not email or not password:
+    password = data.get("password")
+    if not email or not isinstance(password, str) or not password:
         return jsonify({"ok": False, "error": "Email e senha são obrigatórios."}), 400
     users = _load_users()
     user = users.get(email)
-    if not user or not user.get("password_hash") or not check_password_hash(user["password_hash"], password):
+    hash_to_check = (user or {}).get("password_hash") or _DUMMY_PASSWORD_HASH
+    password_ok = check_password_hash(hash_to_check, password)
+    if not user or not user.get("password_hash") or not password_ok:
+        _record_failed_attempt(_bipador_login_attempts, ip, count, window_start)
         return jsonify({"ok": False, "error": "Email ou senha incorretos."}), 401
+    _bipador_login_attempts.pop(ip, None)
     user_public = {k: v for k, v in user.items() if k != "password_hash"}
     return jsonify({"ok": True, "user": user_public})
 
