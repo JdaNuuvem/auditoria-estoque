@@ -305,6 +305,10 @@ def audit_count():
 
     if not session_id or product_id is None:
         return jsonify({"ok": False, "error": "sessionId e productId sao obrigatorios."}), 400
+    try:
+        int(product_id)
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "productId deve ser um numero."}), 400
     if has_delta and has_qtd:
         return jsonify({"ok": False, "error": "Informe apenas um de delta ou qtd, nao os dois."}), 400
     if not has_delta and not has_qtd:

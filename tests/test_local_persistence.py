@@ -240,3 +240,14 @@ def test_audit_count_calcula_qtd_sistema_e_diferenca(client):
     assert body["qtdSistema"] == 8
     assert body["diferenca"] == -2
     server.CACHE["estoques"] = []
+
+
+def test_audit_count_rejeita_productId_nao_numerico(client):
+    sid = _start_session(client)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": "abc", "ean": "1", "descricao": "X", "delta": 1,
+    })
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "productId deve ser um numero."
+    saved = server._load_audit()[sid]
+    assert "abc" not in saved["encontrados"]
