@@ -1044,6 +1044,7 @@ function switchAuditPanel(panel) {
   $('#existentes-panel').style.display = panel === 'existentes' ? 'block' : 'none';
   $('#contado-panel').style.display = panel === 'contado' ? 'block' : 'none';
   $('#search-results').style.display = 'none';
+  updateScanStats();
   if (panel === 'existentes') updateAuditUI();
   else if (panel === 'contado') renderCountList();
 }
@@ -1604,6 +1605,7 @@ async function startAuditInternal(existingSession) {
   if (!S.session) return; // falhou ao iniciar auditoria no servidor
   $('#hdr-filial').textContent = S.user.filialNome;
   $('#hdr-auditor').textContent = S.user.name + ' (' + S.user.email + ')';
+  $('#product-panel-body').innerHTML = '<span style="color:var(--muted);font-size:.85rem">Bipe um produto para ver os detalhes.</span>';
   $('#setup-modal').style.display = 'none';
   $('#app').classList.add('active');
   if (!S.dataReady) loadAllData().then(() => switchView('audit'));
