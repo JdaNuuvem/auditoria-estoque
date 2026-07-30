@@ -925,6 +925,7 @@ function selectManualProduct(productId) {
   const p = S.productsMap[productId];
   if (!p) return;
   if (S.auditMode === 'contagem') {
+    if (!S.session) { toast('Inicie uma auditoria primeiro.', 'err'); return; }
     applyCountDelta(productId, 1);
     const qtd = S.session.encontrados[productId].qtd;
     showScanFeedback(`✅ ${p.descricao} — contagem: ${qtd}`, 'ok');
@@ -1033,6 +1034,7 @@ function processCountScan(raw) {
   showScanFeedback(`✅ ${product.descricao} — contagem: ${qtd}`, 'ok');
   playBeep();
   showProductDetails(product);
+  updateDashboardUI();
   $('#scan-input').focus();
 }
 
