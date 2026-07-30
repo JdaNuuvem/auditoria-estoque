@@ -117,7 +117,8 @@ def test_admin_login_senha_errada(client, monkeypatch):
 def test_admin_bipadores_cria_usuario_com_senha_correta(client, monkeypatch):
     monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
     resp = client.post("/api/admin/bipadores", json={
-        "adminPassword": "segredo123", "name": "Carlos", "email": "carlos@x.com", "filialId": 3,
+        "adminPassword": "segredo123", "name": "Carlos", "email": "carlos@x.com",
+        "password": "senha123", "filialId": 3,
     })
     assert resp.status_code == 201
     assert "carlos@x.com" in server._load_users()
@@ -126,7 +127,8 @@ def test_admin_bipadores_cria_usuario_com_senha_correta(client, monkeypatch):
 def test_admin_bipadores_rejeita_senha_errada(client, monkeypatch):
     monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
     resp = client.post("/api/admin/bipadores", json={
-        "adminPassword": "errada", "name": "Carlos", "email": "carlos@x.com", "filialId": 3,
+        "adminPassword": "errada", "name": "Carlos", "email": "carlos@x.com",
+        "password": "senha123", "filialId": 3,
     })
     assert resp.status_code == 403
     assert "carlos@x.com" not in server._load_users()
@@ -140,10 +142,127 @@ def test_admin_bipadores_exige_campos_obrigatorios(client, monkeypatch):
 
 def test_admin_bipadores_rejeita_email_duplicado(client, monkeypatch):
     monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
-    payload = {"adminPassword": "segredo123", "name": "Carlos", "email": "carlos@x.com", "filialId": 3}
+    payload = {
+        "adminPassword": "segredo123", "name": "Carlos", "email": "carlos@x.com",
+        "password": "senha123", "filialId": 3,
+    }
     client.post("/api/admin/bipadores", json=payload)
     resp = client.post("/api/admin/bipadores", json=payload)
     assert resp.status_code == 409
+
+
+def test_admin_bipadores_exige_senha_com_hash_e_nunca_texto_puro(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Dora", "email": "dora@x.com",
+        "password": "minhasenha", "filialId": 3,
+    })
+    assert resp.status_code == 201
+    stored = server._load_users()["dora@x.com"]
+    assert "password_hash" in stored
+    assert stored["password_hash"] != "minhasenha"
+    assert "password_hash" not in resp.get_json()["user"]
+
+
+def test_admin_bipadores_rejeita_senha_curta(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Eva", "email": "eva@x.com",
+        "password": "123", "filialId": 3,
+    })
+    assert resp.status_code == 400
+
+
+def test_admin_bipadores_rejeita_senha_ausente(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Fabio", "email": "fabio@x.com", "filialId": 3,
+    })
+    assert resp.status_code == 400
+
+
+def test_login_com_senha_correta_funciona(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Gustavo", "email": "gustavo@x.com",
+        "password": "senhacerta", "filialId": 3,
+    })
+    resp = client.post("/api/auth/login", json={"email": "gustavo@x.com", "password": "senhacerta"})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert "password_hash" not in body["user"]
+
+
+def test_login_com_senha_errada_e_rejeitado(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Helena", "email": "helena@x.com",
+        "password": "senhacerta", "filialId": 3,
+    })
+    resp = client.post("/api/auth/login", json={"email": "helena@x.com", "password": "senhaerrada"})
+    assert resp.status_code == 401
+    assert resp.get_json()["ok"] is False
+
+
+def test_login_de_conta_legada_sem_password_hash_e_rejeitado(client):
+    resp = client.post("/api/auth/login", json={"email": "a@a.com", "password": "qualquer"})
+    assert resp.status_code == 401
+    assert resp.get_json()["ok"] is False
+
+
+def test_list_users_nunca_devolve_password_hash(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Igor", "email": "igor@x.com",
+        "password": "senha123", "filialId": 3,
+    })
+    resp = client.get("/api/auth/users")
+    users = resp.get_json()["users"]
+    assert len(users) > 0
+    assert all("password_hash" not in u for u in users)
+
+
+def test_reset_password_funciona_e_senha_antiga_deixa_de_funcionar(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Julia", "email": "julia@x.com",
+        "password": "senhaA1", "filialId": 3,
+    })
+    resp = client.post("/api/admin/bipadores/reset-password", json={
+        "adminPassword": "segredo123", "email": "julia@x.com", "password": "senhaB2",
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+
+    old_login = client.post("/api/auth/login", json={"email": "julia@x.com", "password": "senhaA1"})
+    assert old_login.status_code == 401
+
+    new_login = client.post("/api/auth/login", json={"email": "julia@x.com", "password": "senhaB2"})
+    assert new_login.status_code == 200
+
+
+def test_reset_password_rejeita_senha_admin_errada(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Kleber", "email": "kleber@x.com",
+        "password": "senhaOriginal", "filialId": 3,
+    })
+    resp = client.post("/api/admin/bipadores/reset-password", json={
+        "adminPassword": "errada", "email": "kleber@x.com", "password": "senhaNova1",
+    })
+    assert resp.status_code == 403
+
+    old_login = client.post("/api/auth/login", json={"email": "kleber@x.com", "password": "senhaOriginal"})
+    assert old_login.status_code == 200
+
+
+def test_reset_password_rejeita_bipador_inexistente(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/bipadores/reset-password", json={
+        "adminPassword": "segredo123", "email": "fantasma@x.com", "password": "senhaNova1",
+    })
+    assert resp.status_code == 404
 
 
 def test_auth_register_nao_existe_mais(client):

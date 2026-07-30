@@ -131,7 +131,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
     <h2>Auditoria de Estoque</h2>
     <div id="auth-login" style="display:flex;flex-direction:column;gap:12px">
       <input id="login-email" type="email" placeholder="Email" autocomplete="email">
-      <input id="login-name" placeholder="Nome completo" autocomplete="name">
+      <input id="login-password" type="password" placeholder="Senha" autocomplete="current-password">
       <button class="btn-p" id="btn-login">Entrar</button>
       <div id="login-error" style="color:var(--d600);font-size:.85rem;display:none"></div>
       <div style="text-align:center;margin-top:4px">
@@ -274,6 +274,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <input id="bip-name" placeholder="Nome completo" style="flex:1;min-width:150px">
           <input id="bip-email" type="email" placeholder="Email" style="flex:1;min-width:150px">
+          <input id="bip-password" type="password" placeholder="Senha (min. 6 caracteres)" autocomplete="new-password" style="flex:1;min-width:150px">
           <select id="bip-filial" style="flex:1;min-width:150px"><option value="">Carregando lojas...</option></select>
           <button class="btn-s" id="btn-create-bipador">Cadastrar</button>
         </div>
@@ -1348,9 +1349,9 @@ function clearAuthErrors() {
 async function handleLogin() {
   clearAuthErrors();
   const email = $('#login-email').value.trim();
-  const name = $('#login-name').value.trim();
-  if (!email || !name) { showAuthError('login', 'Preencha email e nome.'); return; }
-  const result = await apiAuth('login', { email, name });
+  const password = $('#login-password').value;
+  if (!email || !password) { showAuthError('login', 'Preencha email e senha.'); return; }
+  const result = await apiAuth('login', { email, password });
   if (!result.ok) { showAuthError('login', result.error); return; }
   onAuthSuccess(result.user);
 }
@@ -1417,6 +1418,7 @@ async function loadBipadoresList() {
           <div class="recent-row" style="cursor:default">
             <span>${escapeHtml(u.name)}</span>
             <span style="color:var(--muted);font-size:.75rem">${escapeHtml(u.email)}</span>
+            <button class="btn-s btn-sm" data-reset-email="${escapeHtml(u.email)}">Redefinir senha</button>
           </div>
         `).join('') : '<div class="empty" style="padding:8px">Nenhum bipador cadastrado.</div>'}
       </div>`;
@@ -1430,23 +1432,44 @@ async function handleCreateBipador() {
   clearAuthErrors();
   const name = $('#bip-name').value.trim();
   const email = $('#bip-email').value.trim();
+  const password = $('#bip-password').value;
   const filialId = Number($('#bip-filial').value);
-  if (!name || !email || !filialId) { showAuthError('bip', 'Preencha todos os campos.'); return; }
+  if (!name || !email || !password || !filialId) { showAuthError('bip', 'Preencha todos os campos.'); return; }
+  if (password.length < 6) { showAuthError('bip', 'Senha deve ter pelo menos 6 caracteres.'); return; }
   try {
     const resp = await fetch('/api/admin/bipadores', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ adminPassword: S.adminPassword, name, email, filialId }),
+      body: JSON.stringify({ adminPassword: S.adminPassword, name, email, password, filialId }),
     });
     const r = await resp.json();
     if (!r.ok) { showAuthError('bip', r.error); return; }
     toast('Bipador cadastrado!', 'ok');
     $('#bip-name').value = '';
     $('#bip-email').value = '';
+    $('#bip-password').value = '';
     $('#bip-filial').value = '';
     loadBipadoresList();
   } catch (e) {
     showAuthError('bip', 'Erro ao cadastrar bipador: sem conexão com o servidor.');
+  }
+}
+
+async function handleResetBipadorPassword(email) {
+  const newPassword = prompt('Nova senha para ' + email + ' (mínimo 6 caracteres):');
+  if (newPassword === null) return;
+  if (newPassword.length < 6) { toast('Senha deve ter pelo menos 6 caracteres.', 'err'); return; }
+  try {
+    const resp = await fetch('/api/admin/bipadores/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassword: S.adminPassword, email, password: newPassword }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro: ' + r.error, 'err'); return; }
+    toast('Senha redefinida com sucesso.', 'ok');
+  } catch (e) {
+    toast('Falha ao redefinir senha — verifique sua conexão.', 'err');
   }
 }
 
@@ -1528,7 +1551,7 @@ async function init() {
 
   // Event: login
   $('#btn-login').addEventListener('click', handleLogin);
-  $('#login-name').addEventListener('keydown', e => { if (e.key === 'Enter') handleLogin(); });
+  $('#login-password').addEventListener('keydown', e => { if (e.key === 'Enter') handleLogin(); });
 
   // Event: admin login
   $('#btn-admin-login').addEventListener('click', handleAdminLogin);
@@ -1536,6 +1559,13 @@ async function init() {
 
   // Event: create bipador
   $('#btn-create-bipador').addEventListener('click', handleCreateBipador);
+
+  // Event: reset bipador password (delegated - #bipadores-list is rebuilt via innerHTML)
+  $('#bipadores-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-reset-email]');
+    if (!btn) return;
+    handleResetBipadorPassword(btn.dataset.resetEmail);
+  });
 
   // Event: logout
   $('#btn-logout').addEventListener('click', () => { if (confirm('Sair da auditoria?')) handleLogout(); });

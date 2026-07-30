@@ -8,6 +8,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
 
 load_dotenv()
 
@@ -408,36 +409,63 @@ def admin_create_bipador():
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
     filial_id = data.get("filialId")
-    if not name or not email or filial_id is None:
-        return jsonify({"ok": False, "error": "Nome, email e loja são obrigatórios."}), 400
+    password = data.get("password") or ""
+    if not name or not email or filial_id is None or not password:
+        return jsonify({"ok": False, "error": "Nome, email, senha e loja são obrigatórios."}), 400
+    if len(password) < 6:
+        return jsonify({"ok": False, "error": "Senha deve ter pelo menos 6 caracteres."}), 400
     users = _load_users()
     if email in users:
         return jsonify({"ok": False, "error": "Email já cadastrado."}), 409
-    users[email] = {"name": name, "email": email, "filialId": filial_id}
+    users[email] = {
+        "name": name, "email": email, "filialId": filial_id,
+        "password_hash": generate_password_hash(password),
+    }
     _save_users(users)
-    return jsonify({"ok": True, "user": users[email]}), 201
+    user_public = {k: v for k, v in users[email].items() if k != "password_hash"}
+    return jsonify({"ok": True, "user": user_public}), 201
+
+
+@app.route("/api/admin/bipadores/reset-password", methods=["POST"])
+def admin_reset_bipador_password():
+    data = request.get_json(silent=True) or {}
+    admin_password = data.get("adminPassword") or ""
+    if not _admin_password_ok(admin_password):
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    if not email or not password:
+        return jsonify({"ok": False, "error": "Email e senha são obrigatórios."}), 400
+    if len(password) < 6:
+        return jsonify({"ok": False, "error": "Senha deve ter pelo menos 6 caracteres."}), 400
+    users = _load_users()
+    if email not in users:
+        return jsonify({"ok": False, "error": "Bipador não encontrado."}), 404
+    users[email]["password_hash"] = generate_password_hash(password)
+    _save_users(users)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/auth/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
-    name = (data.get("name") or "").strip()
-    if not email or not name:
-        return jsonify({"ok": False, "error": "Email e nome são obrigatórios."}), 400
+    password = data.get("password") or ""
+    if not email or not password:
+        return jsonify({"ok": False, "error": "Email e senha são obrigatórios."}), 400
     users = _load_users()
     user = users.get(email)
-    if not user:
-        return jsonify({"ok": False, "error": "Email não cadastrado."}), 404
-    if user["name"].lower() != name.lower():
-        return jsonify({"ok": False, "error": "Nome não confere."}), 401
-    return jsonify({"ok": True, "user": user})
+    if not user or not user.get("password_hash") or not check_password_hash(user["password_hash"], password):
+        return jsonify({"ok": False, "error": "Email ou senha incorretos."}), 401
+    user_public = {k: v for k, v in user.items() if k != "password_hash"}
+    return jsonify({"ok": True, "user": user_public})
 
 
 @app.route("/api/auth/users", methods=["GET"])
 def list_users():
     users = _load_users()
-    return jsonify({"ok": True, "users": list(users.values())})
+    public = [{k: v for k, v in u.items() if k != "password_hash"} for u in users.values()]
+    return jsonify({"ok": True, "users": public})
 
 
 @app.route("/api/sales/<int:idproduto>")
