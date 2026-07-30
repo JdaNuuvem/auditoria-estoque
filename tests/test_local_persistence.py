@@ -40,7 +40,7 @@ def test_audit_session_start_rejeita_email_nao_cadastrado(client):
     assert resp.get_json()["ok"] is False
 
 
-def test_audit_fluxo_completo_start_scan_dup_finish(client):
+def test_audit_fluxo_completo_start_scan_dup(client):
     r = client.post("/api/audit/session/start", json={
         "filialId": 1, "filialNome": "Loja 1", "userEmail": "a@a.com", "userName": "A",
     })
@@ -55,8 +55,92 @@ def test_audit_fluxo_completo_start_scan_dup_finish(client):
     r2 = client.post("/api/audit/scan", json={"sessionId": sid, "productId": 100, "ean": "123", "descricao": "X"})
     assert r2.get_json() == {"ok": True, "dup": True}
 
-    r3 = client.post("/api/audit/session/finish", json={"sessionId": sid})
-    assert r3.get_json()["session"]["fim"] != ""
+
+def test_audit_session_start_reusa_sessao_da_mesma_loja_no_mesmo_dia(client):
+    r1 = client.post("/api/audit/session/start", json={
+        "filialId": 1, "filialNome": "Loja 1", "userEmail": "a@a.com", "userName": "A",
+    })
+    assert r1.status_code == 201
+    sid1 = r1.get_json()["session"]["id"]
+
+    r2 = client.post("/api/audit/session/start", json={
+        "filialId": 1, "filialNome": "Loja 1", "userEmail": "b@b.com", "userName": "B",
+    })
+    assert r2.status_code == 200
+    sid2 = r2.get_json()["session"]["id"]
+
+    assert sid1 == sid2
+    assert len(server._load_audit()) == 1
+
+
+def test_audit_session_start_cria_sessao_separada_para_loja_diferente(client):
+    r1 = client.post("/api/audit/session/start", json={
+        "filialId": 1, "filialNome": "Loja 1", "userEmail": "a@a.com", "userName": "A",
+    })
+    r2 = client.post("/api/audit/session/start", json={
+        "filialId": 2, "filialNome": "Loja 2", "userEmail": "b@b.com", "userName": "B",
+    })
+    assert r1.get_json()["session"]["id"] != r2.get_json()["session"]["id"]
+    assert len(server._load_audit()) == 2
+
+
+def test_audit_session_finish_nao_existe_mais(client):
+    r = client.post("/api/audit/session/start", json={
+        "filialId": 1, "filialNome": "Loja 1", "userEmail": "a@a.com", "userName": "A",
+    })
+    sid = r.get_json()["session"]["id"]
+    resp = client.post("/api/audit/session/finish", json={"sessionId": sid})
+    assert resp.status_code == 404
+
+
+def test_admin_login_senha_correta(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/login", json={"password": "segredo123"})
+    assert resp.get_json() == {"ok": True}
+
+
+def test_admin_login_senha_errada(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/login", json={"password": "errada"})
+    assert resp.status_code == 401
+    assert resp.get_json()["ok"] is False
+
+
+def test_admin_bipadores_cria_usuario_com_senha_correta(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/bipadores", json={
+        "adminPassword": "segredo123", "name": "Carlos", "email": "carlos@x.com", "filialId": 3,
+    })
+    assert resp.status_code == 201
+    assert "carlos@x.com" in server._load_users()
+
+
+def test_admin_bipadores_rejeita_senha_errada(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/bipadores", json={
+        "adminPassword": "errada", "name": "Carlos", "email": "carlos@x.com", "filialId": 3,
+    })
+    assert resp.status_code == 403
+    assert "carlos@x.com" not in server._load_users()
+
+
+def test_admin_bipadores_exige_campos_obrigatorios(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/bipadores", json={"adminPassword": "segredo123", "name": "Carlos"})
+    assert resp.status_code == 400
+
+
+def test_admin_bipadores_rejeita_email_duplicado(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    payload = {"adminPassword": "segredo123", "name": "Carlos", "email": "carlos@x.com", "filialId": 3}
+    client.post("/api/admin/bipadores", json=payload)
+    resp = client.post("/api/admin/bipadores", json=payload)
+    assert resp.status_code == 409
+
+
+def test_auth_register_nao_existe_mais(client):
+    resp = client.post("/api/auth/register", json={"name": "X", "email": "x@x.com", "filialId": 1})
+    assert resp.status_code == 404
 
 
 def test_audit_sessions_de_usuarios_diferentes_ficam_visiveis_juntas(client):

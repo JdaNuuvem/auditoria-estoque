@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 import time
@@ -16,6 +17,7 @@ CORS(app)
 API_BASE = "https://api.i9logic.net/v1"
 CLIENT_ID = os.environ["I9LOGIC_CLIENT_ID"]
 TOKEN = os.environ["I9LOGIC_TOKEN"]
+ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
@@ -248,11 +250,18 @@ def audit_session_start():
     with _audit_lock:
         sessions = _load_audit()
         hoje = date.today().isoformat()
+        # Sessao compartilhada por loja+dia: bipadores da mesma loja no mesmo dia
+        # caem na mesma sessao (nao criam uma nova a cada login), para verem uns
+        # aos outros o que ja foi confirmado/contado.
+        existing = next((s for s in sessions.values()
+                          if s["filialId"] == filial_id and s["data"] == hoje), None)
+        if existing:
+            return jsonify({"ok": True, "session": existing}), 200
         session_id = f"audit_{filial_id}_{hoje}_{int(time.time() * 1000)}"
         session = {
             "id": session_id, "userEmail": user_email, "userName": user_name,
             "filialId": filial_id, "filialNome": filial_nome, "data": hoje,
-            "inicio": datetime.now().strftime("%H:%M:%S"), "fim": "",
+            "inicio": datetime.now().strftime("%H:%M:%S"),
             "encontrados": {},
         }
         sessions[session_id] = session
@@ -346,22 +355,6 @@ def audit_count():
     })
 
 
-@app.route("/api/audit/session/finish", methods=["POST"])
-def audit_session_finish():
-    data = request.get_json(silent=True) or {}
-    session_id = data.get("sessionId")
-    if not session_id:
-        return jsonify({"ok": False, "error": "sessionId e obrigatorio."}), 400
-    with _audit_lock:
-        sessions = _load_audit()
-        session = sessions.get(session_id)
-        if not session:
-            return jsonify({"ok": False, "error": "Sessao nao encontrada."}), 404
-        session["fim"] = datetime.now().strftime("%H:%M:%S")
-        _save_audit(sessions)
-    return jsonify({"ok": True, "session": session})
-
-
 def _load_users():
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
@@ -375,9 +368,21 @@ def _save_users(users):
         json.dump(users, f, indent=2, ensure_ascii=False)
 
 
-@app.route("/api/auth/register", methods=["POST"])
-def register():
+@app.route("/api/admin/login", methods=["POST"])
+def admin_login():
     data = request.get_json(silent=True) or {}
+    password = data.get("password") or ""
+    if not hmac.compare_digest(password, ADMIN_PASSWORD):
+        return jsonify({"ok": False, "error": "Senha incorreta."}), 401
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/bipadores", methods=["POST"])
+def admin_create_bipador():
+    data = request.get_json(silent=True) or {}
+    admin_password = data.get("adminPassword") or ""
+    if not hmac.compare_digest(admin_password, ADMIN_PASSWORD):
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
     filial_id = data.get("filialId")
