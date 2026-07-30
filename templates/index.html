@@ -341,6 +341,9 @@ function fmtMoney(n) { return n != null ? Number(n).toLocaleString('pt-BR', { st
 function lsGet(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) { toast('Armazenamento local cheio! Limpe dados antigos.', 'err'); } }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+function escapeHtml(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 /* ===== TOAST ===== */
 let toastTimer;
@@ -1398,8 +1401,8 @@ async function loadBipadoresList() {
       <h4 style="margin-bottom:8px">${f.fantasia || f.razaosocial} (${list.length} bipador${list.length !== 1 ? 'es' : ''})</h4>
       ${list.length ? list.map(u => `
         <div class="recent-row" style="cursor:default">
-          <span>${u.name}</span>
-          <span style="color:var(--muted);font-size:.75rem">${u.email}</span>
+          <span>${escapeHtml(u.name)}</span>
+          <span style="color:var(--muted);font-size:.75rem">${escapeHtml(u.email)}</span>
         </div>
       `).join('') : '<div class="empty" style="padding:8px">Nenhum bipador cadastrado.</div>'}
     </div>`;
