@@ -298,8 +298,8 @@ def audit_count():
     data = request.get_json(silent=True) or {}
     session_id = data.get("sessionId")
     product_id = data.get("productId")
-    ean = data.get("ean") or ""
-    descricao = data.get("descricao") or ""
+    ean = (data.get("ean") or "")[:64]
+    descricao = (data.get("descricao") or "")[:200]
     has_delta = "delta" in data
     has_qtd = "qtd" in data
 
@@ -342,6 +342,7 @@ def audit_count():
         "qtd": entry["qtd"],
         "qtdSistema": qtd_sistema,
         "diferenca": entry["qtd"] - qtd_sistema,
+        "qtdSistemaDisponivel": bool(CACHE.get("estoques")),
     })
 
 

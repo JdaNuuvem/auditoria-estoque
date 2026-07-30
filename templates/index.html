@@ -807,6 +807,14 @@ function printLabel(productId) {
 }
 
 /* ===== SCANNER INPUT ===== */
+// Dispara o scan pelo sub-modo ativo (Verificação/Contagem) — fonte unica usada
+// pelo leitor USB/teclado, pela câmera e pela leitura de imagem, para que os
+// três nunca divirjam sobre qual fluxo um código bipado deve seguir.
+function dispatchScan(barcode) {
+  if (S.auditMode === 'contagem') processCountScan(barcode);
+  else processScan(barcode);
+}
+
 function initScannerInput() {
   const inp = $('#scan-input');
   if (!inp) return;
@@ -816,8 +824,7 @@ function initScannerInput() {
       const val = inp.value.trim();
       inp.value = '';
       if (!val) return;
-      if (S.auditMode === 'contagem') processCountScan(val);
-      else processScan(val);
+      dispatchScan(val);
     }
   });
 }
@@ -858,7 +865,7 @@ function scanCameraLoop(video) {
       const barcodes = await S.barcodeDetector.detect(video);
       if (barcodes.length > 0) {
         stopCamera();
-        processScan(barcodes[0].rawValue);
+        dispatchScan(barcodes[0].rawValue);
         return;
       }
     } catch {}
@@ -884,7 +891,7 @@ function scanFile(file) {
     try {
       const barcodes = await S.barcodeDetector.detect(img);
       if (barcodes.length > 0) {
-        processScan(barcodes[0].rawValue);
+        dispatchScan(barcodes[0].rawValue);
       } else {
         toast('Nenhum código de barras detectado na imagem.', 'warn');
       }
@@ -980,6 +987,18 @@ function setCountForProduct(productId, qtd) {
 }
 
 function syncCountToServer(productId, ean, descricao, payload) {
+  // payload é { delta } (scan/+1/-1) ou { qtd } (edição manual do valor exato).
+  // Requests concorrentes podem responder fora de ordem — para deltas, o valor
+  // local já foi somado/subtraído de forma otimista e correta antes do fetch
+  // ser disparado, então uma resposta atrasada nunca deve sobrescrever `qtd`
+  // com um valor mais antigo. `qtdSistema` vem do cache de estoque (não muda
+  // por causa da ordem das requisições de contagem), então é seguro adotar
+  // sempre. `diferenca`, porém, é `qtd - qtdSistema` calculado no servidor no
+  // momento daquela requisição específica — se adotássemos o `diferenca` de
+  // uma resposta atrasada, ele ficaria descasado do `qtd` já exibido
+  // localmente. Por isso recomputamos `diferenca` aqui, no cliente, sempre a
+  // partir do `qtd` local atual (que é a fonte de verdade exibida na tela).
+  const isDelta = 'delta' in payload;
   fetch('/api/audit/count', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -988,9 +1007,14 @@ function syncCountToServer(productId, ean, descricao, payload) {
     if (!r.ok) { toast('Aviso: falha ao salvar contagem — ' + r.error, 'warn'); return; }
     const entry = S.session.encontrados[productId];
     if (entry) {
-      entry.qtd = r.qtd;
-      entry.qtdSistema = r.qtdSistema;
-      entry.diferenca = r.diferenca;
+      if (!isDelta) {
+        // Edição manual: normalmente só há uma requisição em voo por vez,
+        // então adotar o qtd do servidor é seguro e mantém o valor exato digitado.
+        entry.qtd = r.qtd;
+      }
+      entry.qtdSistemaDisponivel = r.qtdSistemaDisponivel;
+      entry.qtdSistema = r.qtdSistemaDisponivel ? r.qtdSistema : null;
+      entry.diferenca = r.qtdSistemaDisponivel ? (entry.qtd - r.qtdSistema) : null;
       renderCountList();
     }
   }).catch(() => toast('Aviso: sem conexão para salvar contagem.', 'warn'));
@@ -998,9 +1022,20 @@ function syncCountToServer(productId, ean, descricao, payload) {
 
 function renderCountList() {
   if (!S.session) return;
-  const entries = Object.entries(S.session.encontrados).filter(([, r]) => (r.qtd || 0) > 0);
+  // Entradas criadas por bipagem/contagem sempre têm a chave `qtd`; entradas
+  // criadas só pela Verificação (markFound/audit_scan) nunca têm — por isso
+  // `qtd != null` distingue "contado (mesmo que 0)" de "só verificado",
+  // permitindo mostrar uma contagem zerada em vez de escondê-la da lista.
+  const entries = Object.entries(S.session.encontrados).filter(([, r]) => r.qtd != null);
   $('#count-total').textContent = entries.length;
-  $('#count-list').innerHTML = entries.map(([id, r]) => `
+  // Mesmo padrão de updateAuditUI: mais recente primeiro (ordem de inserção
+  // das chaves reversa) e lista limitada a 100 linhas.
+  const items = entries.reverse().slice(0, 100);
+  $('#count-list').innerHTML = items.map(([id, r]) => {
+    const semDados = r.qtdSistemaDisponivel === false;
+    const sistemaTxt = semDados ? '—' : (r.qtdSistema != null ? r.qtdSistema : '...');
+    const diferencaTxt = semDados ? '—' : (r.diferenca != null ? (r.diferenca > 0 ? '+' : '') + r.diferenca : '...');
+    return `
     <div class="recent-row" style="flex-direction:column;align-items:stretch;gap:6px;cursor:default">
       <div style="display:flex;justify-content:space-between">
         <strong>${r.descricao}</strong>
@@ -1012,11 +1047,12 @@ function renderCountList() {
                onchange="setCountForProduct(${id}, parseInt(this.value)||0)">
         <button class="btn-o btn-sm" onclick="applyCountDelta(${id}, 1)">+1</button>
         <span style="font-size:.8rem;color:var(--muted)">
-          Sistema: ${r.qtdSistema != null ? r.qtdSistema : '...'} | Diferença: ${r.diferenca != null ? (r.diferenca > 0 ? '+' : '') + r.diferenca : '...'}
+          Sistema: ${sistemaTxt} | Diferença: ${diferencaTxt}
         </span>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function processCountScan(raw) {

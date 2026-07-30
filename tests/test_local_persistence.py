@@ -242,6 +242,25 @@ def test_audit_count_calcula_qtd_sistema_e_diferenca(client):
     server.CACHE["estoques"] = []
 
 
+def test_audit_count_qtd_sistema_disponivel_false_quando_cache_vazio(client):
+    server.CACHE["estoques"] = []
+    sid = _start_session(client)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": 1,
+    })
+    assert resp.get_json()["qtdSistemaDisponivel"] is False
+
+
+def test_audit_count_qtd_sistema_disponivel_true_quando_cache_populado(client):
+    server.CACHE["estoques"] = [{"idproduto": 100, "filial": 1, "qtd": 5, "tipoestoque": 1}]
+    sid = _start_session(client)
+    resp = client.post("/api/audit/count", json={
+        "sessionId": sid, "productId": 100, "ean": "1", "descricao": "X", "delta": 1,
+    })
+    assert resp.get_json()["qtdSistemaDisponivel"] is True
+    server.CACHE["estoques"] = []
+
+
 def test_audit_count_rejeita_productId_nao_numerico(client):
     sid = _start_session(client)
     resp = client.post("/api/audit/count", json={
