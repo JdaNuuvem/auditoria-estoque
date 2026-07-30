@@ -428,6 +428,7 @@ def admin_create_bipador():
     if not _admin_password_ok(admin_password):
         _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
         return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
     filial_id = data.get("filialId")
@@ -461,6 +462,7 @@ def admin_reset_bipador_password():
     if not _admin_password_ok(admin_password):
         _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
         return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
     email = (data.get("email") or "").strip().lower()
     password = data.get("password")
     if not email or not isinstance(password, str) or not password:
