@@ -5,6 +5,7 @@ __pycache__/
 users.json
 cache_data.json
 audit_sessions.json
+dedup_groups.json
 server.log
 .claude/
 .claude-flow/
