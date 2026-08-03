@@ -80,7 +80,7 @@ def _rate_limit():
 
 
 # ponytail: server-side cache, single source for all users
-CACHE = {"filiais": [], "produtos": [], "estoques": [], "precos": [], "ready": False, "loading": False, "progress": {}}
+CACHE = {"filiais": [], "produtos": [], "estoques": [], "precos": [], "ready": False, "loading": False, "progress": {}, "last_error": None}
 
 
 def _paginated_fetch(entity, filter_fn=None, per_page=200):
@@ -144,7 +144,9 @@ def refresh_cache():
         CACHE["synced_at"] = datetime.now().isoformat()
         _save_cache_to_disk()
         print(f"[cache] Sincronizacao concluida: {len(produtos)} produtos, {len(estoques)} estoques, {len(precos)} precos")
+        CACHE["last_error"] = None
     except Exception as exc:
+        CACHE["last_error"] = str(exc)
         print(f"[cache] Falha ao sincronizar: {exc}")
     finally:
         CACHE["loading"] = False
@@ -184,7 +186,8 @@ def cache_status():
         counts = {"filiais": len(CACHE["filiais"]), "produtos": len(CACHE["produtos"]),
                    "estoques": len(CACHE["estoques"]), "precos": len(CACHE["precos"])}
     return jsonify({"ok": True, "ready": CACHE["ready"], "loading": CACHE["loading"],
-                    "synced_at": CACHE.get("synced_at"), "counts": counts})
+                     "synced_at": CACHE.get("synced_at"), "counts": counts,
+                     "last_error": CACHE.get("last_error")})
 
 
 @app.route("/api/cache/<entity>")
