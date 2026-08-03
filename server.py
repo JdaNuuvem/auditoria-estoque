@@ -655,10 +655,6 @@ def admin_update_bipador_filial():
     if not email or filial_id is None:
         return jsonify({"ok": False, "error": "Email e filialId sao obrigatorios."}), 400
 
-    filial = next((f for f in CACHE.get("filiais", []) if f["id"] == filial_id), None)
-    if not filial:
-        return jsonify({"ok": False, "error": "Loja nao encontrada."}), 400
-
     with _users_lock:
         users = _load_users()
         if email not in users:
@@ -666,7 +662,7 @@ def admin_update_bipador_filial():
         users[email]["filialId"] = filial_id
         _save_users(users)
 
-    return jsonify({"ok": True, "filialId": filial_id, "filialNome": filial["fantasia"] or filial["razaosocial"]})
+    return jsonify({"ok": True, "filialId": filial_id})
 
 
 @app.route("/api/admin/dedup/analyze", methods=["POST"])

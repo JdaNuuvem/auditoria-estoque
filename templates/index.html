@@ -1661,7 +1661,7 @@ async function handleUpdateBipadorFilial(email, filialId) {
     });
     const r = await resp.json();
     if (!r.ok) { toast('Erro: ' + r.error, 'err'); return; }
-    toast('Loja alterada para ' + r.filialNome, 'ok');
+    toast('Loja alterada.', 'ok');
     loadBipadoresList();
   } catch (e) {
     toast('Falha ao alterar loja — verifique sua conexão.', 'err');
