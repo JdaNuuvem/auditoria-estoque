@@ -435,6 +435,17 @@ class _UnionFind:
             self.parent[ra] = rb
 
 
+def _ean_valida(ean):
+    """Retorna o EAN normalizado, ou string vazia se for placeholder/ausente.
+
+    O i9logic usa o literal "SEM GTIN" no campo ean para produtos sem codigo de
+    barras real. Tratar esse valor como EAN valido faria o bucketing agrupar
+    todo produto sem GTIN como se fosse duplicata de qualquer outro sem GTIN.
+    """
+    ean = str(ean or "").strip()
+    return ean if ean.upper() != "SEM GTIN" else ""
+
+
 def _find_duplicate_candidates(filial_id):
     stocked_ids = {e.get("idproduto") for e in CACHE.get("estoques", []) if e.get("filial") == filial_id}
     products = [p for p in CACHE.get("produtos", []) if p.get("id") in stocked_ids]
@@ -448,7 +459,7 @@ def _find_duplicate_candidates(filial_id):
 
     by_ean = {}
     for p in products:
-        ean = str(p.get("ean") or "").strip()
+        ean = _ean_valida(p.get("ean"))
         if ean:
             by_ean.setdefault(ean, []).append(p["id"])
     for ids in by_ean.values():
@@ -495,7 +506,7 @@ def _find_duplicate_candidates(filial_id):
             for j in range(i + 1, len(member_ids)):
                 a_id, b_id = member_ids[i], member_ids[j]
                 a, b = by_id[a_id], by_id[b_id]
-                ean_a, ean_b = str(a.get("ean") or "").strip(), str(b.get("ean") or "").strip()
+                ean_a, ean_b = _ean_valida(a.get("ean")), _ean_valida(b.get("ean"))
                 if ean_a and ean_a == ean_b:
                     signals_set.add("ean_igual")
                     pair_effective_scores.append(100)

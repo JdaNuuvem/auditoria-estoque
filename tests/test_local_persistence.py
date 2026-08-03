@@ -708,6 +708,30 @@ def test_find_duplicate_candidates_grupo_de_tres_confianca_usa_o_pior_par(client
     server.CACHE["estoques"] = []
 
 
+def test_find_duplicate_candidates_ignora_ean_placeholder_sem_gtin(client):
+    """Regressao com dado real de producao: o i9logic usa o literal "SEM GTIN" no
+    campo ean para produtos sem codigo de barras real. Tratar isso como EAN valido
+    faria o bucketing agrupar QUALQUER produto sem GTIN como duplicata de outro
+    (mega-grupo com centenas de produtos nao relacionados). A checagem precisa ser
+    case-insensitive ("SEM GTIN" e "sem gtin" sao o mesmo placeholder)."""
+    _set_dedup_catalog(
+        produtos=[
+            {"id": 60, "descricao": "Caneca Termica Aco", "ean": "SEM GTIN", "ncm": "7323", "marca": "CasaX", "codproduto": "G1"},
+            {"id": 61, "descricao": "Espatula Silicone Cozinha", "ean": "sem gtin", "ncm": "8205", "marca": "CasaY", "codproduto": "G2"},
+            {"id": 62, "descricao": "Cilios Posticos Volume", "ean": "SEM GTIN", "ncm": "9615", "marca": "BelezaZ", "codproduto": "G3"},
+        ],
+        estoques=[
+            {"idproduto": 60, "filial": 1, "qtd": 1},
+            {"idproduto": 61, "filial": 1, "qtd": 1},
+            {"idproduto": 62, "filial": 1, "qtd": 1},
+        ],
+    )
+    candidates = server._find_duplicate_candidates(1)
+    assert candidates == []
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []
+
+
 def test_dedup_analyze_exige_senha_admin_correta(client, monkeypatch):
     monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
     resp = client.post("/api/admin/dedup/analyze", json={"adminPassword": "errada", "filialId": 1})
