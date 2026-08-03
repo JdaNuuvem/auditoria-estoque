@@ -115,17 +115,26 @@ def refresh_cache():
     """So confirma (ready + grava em disco) apos as 4 entidades sincronizarem por completo.
     Uma falha parcial (ex: rate limit) mantem o cache anterior intacto em vez de gravar dados incompletos.
     'progress' vai sendo preenchido entidade-a-entidade so para a barra de progresso do front."""
+    print("[cache] Iniciando sincronizacao com a API...")
     CACHE["loading"] = True
     CACHE["progress"] = {}
     try:
+        print("[cache] Baixando filiais...")
         filiais = _paginated_fetch("filiais", per_page=100)
         CACHE["progress"]["filiais"] = len(filiais)
+        print(f"[cache] {len(filiais)} filiais")
+        print("[cache] Baixando produtos...")
         produtos = _paginated_fetch("produtos", filter_fn=lambda p: p.get("ean") and str(p["ean"]).strip())
         CACHE["progress"]["produtos"] = len(produtos)
+        print(f"[cache] {len(produtos)} produtos")
+        print("[cache] Baixando estoques...")
         estoques = _paginated_fetch("produtos_estoques")
         CACHE["progress"]["estoques"] = len(estoques)
+        print(f"[cache] {len(estoques)} estoques")
+        print("[cache] Baixando precos...")
         precos = _paginated_fetch("precos")
         CACHE["progress"]["precos"] = len(precos)
+        print(f"[cache] {len(precos)} precos")
 
         CACHE["filiais"] = filiais
         CACHE["produtos"] = produtos
@@ -134,8 +143,9 @@ def refresh_cache():
         CACHE["ready"] = True
         CACHE["synced_at"] = datetime.now().isoformat()
         _save_cache_to_disk()
+        print(f"[cache] Sincronizacao concluida: {len(produtos)} produtos, {len(estoques)} estoques, {len(precos)} precos")
     except Exception as exc:
-        print(f"[cache] Falha ao sincronizar: {exc}. Cache anterior mantido.")
+        print(f"[cache] Falha ao sincronizar: {exc}")
     finally:
         CACHE["loading"] = False
         CACHE["progress"] = {}
@@ -884,8 +894,11 @@ def index():
 if __name__ == "__main__":
     print("Servidor iniciado em http://localhost:5000")
     if _load_cache_from_disk():
-        print(f"Cache carregado do disco: {len(CACHE['produtos'])} produtos (sincronizado em {CACHE.get('synced_at')}). "
-              "Use 'Recarregar Dados' para resincronizar com a API.")
+        if len(CACHE.get("produtos", [])) > 0:
+            print(f"Cache carregado do disco: {len(CACHE['produtos'])} produtos (sincronizado em {CACHE.get('synced_at')}).")
+        else:
+            print("Cache em disco vazio, iniciando sincronizacao com API...")
+            threading.Thread(target=refresh_cache, daemon=True).start()
     else:
         threading.Thread(target=refresh_cache, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False)
