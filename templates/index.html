@@ -166,7 +166,6 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
       <button data-view="debug">Diagnóstico API</button>
       <button data-view="bipadores" style="display:none">Bipadores</button>
       <button data-view="dedup" style="display:none">Deduplicação</button>
-      <button class="btn-s btn-sm" id="btn-reload-data">Recarregar Dados</button>
     </nav>
   </header>
   <main>
@@ -203,7 +202,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
             <input id="scan-input" class="scan-input" placeholder="Bipe o código de barras aqui..." autocomplete="off" inputmode="numeric">
             <div class="scan-actions">
               <button class="btn-p" id="btn-camera">Câmera</button>
-              <input id="manual-search" placeholder="Buscar por nome, SKU, EAN ou NCM..." style="flex:1;min-width:150px">
+              <input id="manual-search" placeholder="Buscar por nome, SKU, EAN, NCM, fornecedor ou categoria..." style="flex:1;min-width:150px">
               <button class="btn-o" id="btn-print-label">Imprimir Etiqueta</button>
             </div>
             <div id="scan-feedback"></div>
@@ -234,7 +233,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
     <div id="reports-view" style="display:none">
       <div class="report-tabs" id="report-tabs"></div>
       <div class="report-toolbar">
-        <input id="report-search" placeholder="Filtrar por nome/SKU/EAN..." style="max-width:220px">
+        <input id="report-search" placeholder="Filtrar por nome, SKU, EAN, NCM, fornecedor, categoria..." style="max-width:220px">
         <label style="font-size:.75rem;display:flex;align-items:center;gap:4px;cursor:pointer">
           <input type="checkbox" id="report-show-inactive"> Inativos
         </label>
@@ -569,7 +568,9 @@ function findByText(q) {
       || fmt(p.ean).includes(ql)
       || fmt(p.referencia).toLowerCase().includes(ql)
       || fmt(p.modelo).toLowerCase().includes(ql)
-      || fmt(p.ncm).includes(ql);
+      || fmt(p.ncm).includes(ql)
+      || fmt(p.fornecedor).toLowerCase().includes(ql)
+      || fmt(p.categoria).toLowerCase().includes(ql);
   }).slice(0, 50);
 }
 
@@ -1185,7 +1186,10 @@ function loadReport() {
     data = data.filter(p =>
       fmt(p.descricao).toLowerCase().includes(q) ||
       fmt(p.codproduto).toLowerCase().includes(q) ||
-      fmt(p.ean).includes(q)
+      fmt(p.ean).includes(q) ||
+      fmt(p.fornecedor).toLowerCase().includes(q) ||
+      fmt(p.categoria).toLowerCase().includes(q) ||
+      fmt(p.ncm).includes(q)
     );
   }
   const sort = ($('#report-sort').value || '');
@@ -1392,7 +1396,6 @@ async function handleAdminLogin() {
     if (!r.ok) { showAuthError('admin', r.error || 'Senha incorreta.'); return; }
     S.isAdmin = true;
     S.adminPassword = password;
-    if (!S.dataReady && S.dataReadyPromise) await S.dataReadyPromise;
     $('#setup-modal').style.display = 'none';
     $('#app').classList.add('active');
     $('#hdr-filial').textContent = 'Admin';
@@ -1405,14 +1408,11 @@ async function handleAdminLogin() {
 }
 
 function updateNavForRole() {
-  const adminOnly = ['bipadores', 'dedup'];
-  const bipadorOnly = ['dashboard', 'audit', 'reports', 'debug'];
+  const adminOnly = ['dashboard', 'reports', 'debug', 'bipadores', 'dedup'];
   $$('nav button[data-view]').forEach(b => {
     const v = b.dataset.view;
     if (adminOnly.includes(v)) b.style.display = S.isAdmin ? '' : 'none';
-    else if (bipadorOnly.includes(v)) b.style.display = S.isAdmin ? 'none' : '';
   });
-  $('#btn-reload-data').style.display = S.isAdmin ? 'none' : '';
 }
 
 function popAdminFilialSelect(selector = '#bip-filial') {
@@ -1751,15 +1751,6 @@ async function init() {
     b.addEventListener('click', () => switchView(b.dataset.view));
   });
 
-  // Event: reload data
-  $('#btn-reload-data').addEventListener('click', () => {
-    if (confirm('Isso irá recarregar todos os dados da API no servidor. Continuar?')) {
-      reloadServerCache().then(() => {
-        if (S.session) updateAuditUI();
-        if (S.view === 'dashboard') renderDashboard();
-      });
-    }
-  });
 
   // Event: camera
   $('#btn-camera').addEventListener('click', startCamera);
@@ -1813,7 +1804,11 @@ async function init() {
   $('#btn-export-csv').addEventListener('click', exportCSV);
   $('#btn-dedup-analyze').addEventListener('click', handleAnalyzeDuplicates);
   $('#btn-dedup-export').addEventListener('click', exportDedupCSV);
-  $('#dedup-filial').addEventListener('change', resetDedupState);
+  $('#dedup-filial').addEventListener('change', () => {
+    resetDedupState();
+    const filialId = Number($('#dedup-filial').value);
+    if (filialId) loadConfirmedDedupGroups(filialId);
+  });
   $('#dedup-candidates-list').addEventListener('click', (e) => {
     const confirmBtn = e.target.closest('[data-dedup-confirm]');
     if (confirmBtn) { handleConfirmDedupGroup(confirmBtn.dataset.dedupConfirm); return; }
