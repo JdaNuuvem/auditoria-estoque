@@ -578,3 +578,102 @@ def test_save_e_load_dedup_faz_roundtrip(client):
     data = {"1": {"123-456": {"status": "approved", "memberProductIds": [123, 456], "canonicalProductId": 123}}}
     server._save_dedup(data)
     assert server._load_dedup() == data
+
+
+def _set_dedup_catalog(produtos, estoques):
+    server.CACHE["produtos"] = produtos
+    server.CACHE["estoques"] = estoques
+
+
+def test_find_duplicate_candidates_detecta_ean_identico(client):
+    _set_dedup_catalog(
+        produtos=[
+            {"id": 1, "descricao": "Batom Vermelho", "ean": "789000000001", "ncm": "3304", "marca": "X", "codproduto": "A1"},
+            {"id": 2, "descricao": "Batom Vermelho Intenso", "ean": "789000000001", "ncm": "3305", "marca": "Y", "codproduto": "A2"},
+        ],
+        estoques=[
+            {"idproduto": 1, "filial": 1, "qtd": 3},
+            {"idproduto": 2, "filial": 1, "qtd": 7},
+        ],
+    )
+    candidates = server._find_duplicate_candidates(1)
+    assert len(candidates) == 1
+    assert candidates[0]["confidence"] == "alta"
+    assert "ean_igual" in candidates[0]["signals"]
+    assert candidates[0]["memberProductIds"] == [1, 2]
+    assert candidates[0]["signature"] == "1-2"
+    estoques_por_id = {m["id"]: m["estoqueFilial"] for m in candidates[0]["members"]}
+    assert estoques_por_id == {1: 3, 2: 7}
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []
+
+
+def test_find_duplicate_candidates_detecta_ncm_marca_descricao_similar(client):
+    _set_dedup_catalog(
+        produtos=[
+            {"id": 10, "descricao": "Shampoo Reparação Intensa 500ml", "ean": "1", "ncm": "3305", "marca": "Beleza", "codproduto": "S1"},
+            {"id": 11, "descricao": "Shampoo Reparacao Intensa 500 ml", "ean": "2", "ncm": "3305", "marca": "Beleza", "codproduto": "S2"},
+        ],
+        estoques=[
+            {"idproduto": 10, "filial": 1, "qtd": 1},
+            {"idproduto": 11, "filial": 1, "qtd": 1},
+        ],
+    )
+    candidates = server._find_duplicate_candidates(1)
+    assert len(candidates) == 1
+    assert candidates[0]["confidence"] in ("alta", "media")
+    assert "ncm_marca_iguais" in candidates[0]["signals"]
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []
+
+
+def test_find_duplicate_candidates_nao_agrupa_produtos_diferentes(client):
+    _set_dedup_catalog(
+        produtos=[
+            {"id": 20, "descricao": "Batom Vermelho", "ean": "1", "ncm": "3304", "marca": "X", "codproduto": "B1"},
+            {"id": 21, "descricao": "Esmalte Azul Metalico", "ean": "2", "ncm": "3305", "marca": "Y", "codproduto": "B2"},
+        ],
+        estoques=[
+            {"idproduto": 20, "filial": 1, "qtd": 1},
+            {"idproduto": 21, "filial": 1, "qtd": 1},
+        ],
+    )
+    candidates = server._find_duplicate_candidates(1)
+    assert candidates == []
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []
+
+
+def test_find_duplicate_candidates_ignora_produto_sem_estoque_na_filial(client):
+    _set_dedup_catalog(
+        produtos=[
+            {"id": 30, "descricao": "Batom Vermelho", "ean": "1", "ncm": "3304", "marca": "X", "codproduto": "C1"},
+            {"id": 31, "descricao": "Batom Vermelho", "ean": "1", "ncm": "3304", "marca": "X", "codproduto": "C2"},
+        ],
+        estoques=[
+            {"idproduto": 30, "filial": 1, "qtd": 1},
+            {"idproduto": 31, "filial": 2, "qtd": 1},
+        ],
+    )
+    candidates_filial_1 = server._find_duplicate_candidates(1)
+    assert candidates_filial_1 == []
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []
+
+
+def test_find_duplicate_candidates_exclui_signature_ja_decidida(client):
+    _set_dedup_catalog(
+        produtos=[
+            {"id": 40, "descricao": "Batom Vermelho", "ean": "1", "ncm": "3304", "marca": "X", "codproduto": "D1"},
+            {"id": 41, "descricao": "Batom Vermelho", "ean": "1", "ncm": "3304", "marca": "X", "codproduto": "D2"},
+        ],
+        estoques=[
+            {"idproduto": 40, "filial": 1, "qtd": 1},
+            {"idproduto": 41, "filial": 1, "qtd": 1},
+        ],
+    )
+    server._save_dedup({"1": {"40-41": {"status": "rejected", "memberProductIds": [40, 41]}}})
+    candidates = server._find_duplicate_candidates(1)
+    assert candidates == []
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []

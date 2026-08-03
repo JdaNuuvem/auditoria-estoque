@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+from rapidfuzz import fuzz
 
 load_dotenv()
 
@@ -416,6 +417,132 @@ def _load_dedup():
 def _save_dedup(data):
     with open(DEDUP_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+class _UnionFind:
+    def __init__(self, items):
+        self.parent = {i: i for i in items}
+
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[ra] = rb
+
+
+def _find_duplicate_candidates(filial_id):
+    stocked_ids = {e.get("idproduto") for e in CACHE.get("estoques", []) if e.get("filial") == filial_id}
+    products = [p for p in CACHE.get("produtos", []) if p.get("id") in stocked_ids]
+    by_id = {p["id"]: p for p in products}
+    if len(by_id) < 2:
+        return []
+
+    decided = _load_dedup().get(str(filial_id), {})
+
+    uf = _UnionFind(by_id.keys())
+    pair_scores = {}
+
+    by_ean = {}
+    for p in products:
+        ean = str(p.get("ean") or "").strip()
+        if ean:
+            by_ean.setdefault(ean, []).append(p["id"])
+    for ids in by_ean.values():
+        if len(ids) < 2:
+            continue
+        base = ids[0]
+        for other in ids[1:]:
+            uf.union(base, other)
+
+    by_ncm_marca = {}
+    for p in products:
+        ncm = str(p.get("ncm") or "").strip()
+        marca = str(p.get("marca") or "").strip()
+        if ncm and marca:
+            by_ncm_marca.setdefault((ncm, marca), []).append(p)
+
+    for group in by_ncm_marca.values():
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                score = fuzz.token_sort_ratio(
+                    _normalize_descricao(a.get("descricao")),
+                    _normalize_descricao(b.get("descricao")),
+                )
+                if score >= 60:
+                    uf.union(a["id"], b["id"])
+                    key = tuple(sorted((a["id"], b["id"])))
+                    pair_scores[key] = score
+
+    components = {}
+    for pid in by_id:
+        root = uf.find(pid)
+        components.setdefault(root, []).append(pid)
+
+    candidates = []
+    for member_ids in components.values():
+        if len(member_ids) < 2:
+            continue
+        signature = _group_signature(member_ids)
+        if signature in decided:
+            continue
+
+        signals_set = set()
+        min_desc_score = None
+        has_ean_match = False
+        for i in range(len(member_ids)):
+            for j in range(i + 1, len(member_ids)):
+                a_id, b_id = member_ids[i], member_ids[j]
+                a, b = by_id[a_id], by_id[b_id]
+                ean_a, ean_b = str(a.get("ean") or "").strip(), str(b.get("ean") or "").strip()
+                if ean_a and ean_a == ean_b:
+                    has_ean_match = True
+                    signals_set.add("ean_igual")
+                key = tuple(sorted((a_id, b_id)))
+                if key in pair_scores:
+                    signals_set.add("ncm_marca_iguais")
+                    score = pair_scores[key]
+                    min_desc_score = score if min_desc_score is None else min(min_desc_score, score)
+
+        if has_ean_match:
+            confidence = "alta"
+        elif min_desc_score is not None and min_desc_score >= 90:
+            confidence = "alta"
+            signals_set.add("descricao_muito_similar")
+        elif min_desc_score is not None and min_desc_score >= 75:
+            confidence = "media"
+        else:
+            confidence = "baixa"
+
+        members = []
+        for pid in sorted(member_ids):
+            p = by_id[pid]
+            members.append({
+                "id": pid,
+                "descricao": p.get("descricao"),
+                "ean": p.get("ean"),
+                "ncm": p.get("ncm"),
+                "marca": p.get("marca"),
+                "codproduto": p.get("codproduto"),
+                "estoqueFilial": _estoque_sistema(pid, filial_id),
+            })
+
+        candidates.append({
+            "signature": signature,
+            "memberProductIds": sorted(member_ids),
+            "confidence": confidence,
+            "signals": sorted(signals_set),
+            "members": members,
+        })
+
+    order = {"alta": 0, "media": 1, "baixa": 2}
+    candidates.sort(key=lambda c: (order[c["confidence"]], -len(c["members"])))
+    return candidates
 
 
 def _load_users():
