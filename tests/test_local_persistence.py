@@ -812,3 +812,45 @@ def test_dedup_groups_devolve_so_aprovados_da_filial_pedida(client, monkeypatch)
     resp_outra_filial = client.get("/api/dedup/groups?filialId=2")
     assert resp_outra_filial.get_json()["groups"] == []
     server.CACHE["produtos"] = []
+
+
+def test_dedup_confirm_com_signature_nao_string_retorna_400(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp_lista = client.post("/api/admin/dedup/confirm", json={
+        "adminPassword": "segredo123", "filialId": 1, "signature": [70, 71], "canonicalProductId": 70,
+    })
+    assert resp_lista.status_code == 400
+    resp_int = client.post("/api/admin/dedup/confirm", json={
+        "adminPassword": "segredo123", "filialId": 1, "signature": 123, "canonicalProductId": 123,
+    })
+    assert resp_int.status_code == 400
+
+
+def test_dedup_reject_com_signature_nao_string_retorna_400(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/dedup/reject", json={
+        "adminPassword": "segredo123", "filialId": 1, "signature": [80, 81],
+    })
+    assert resp.status_code == 400
+
+
+def test_dedup_bulk_confirm_ignora_item_invalido_na_lista_de_signatures(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    server.CACHE["estoques"] = [
+        {"idproduto": 70, "filial": 1, "qtd": 3},
+        {"idproduto": 71, "filial": 1, "qtd": 9},
+        {"idproduto": 72, "filial": 1, "qtd": 1},
+        {"idproduto": 73, "filial": 1, "qtd": 5},
+    ]
+    resp = client.post("/api/admin/dedup/bulk-confirm", json={
+        "adminPassword": "segredo123", "filialId": 1, "signatures": ["70-71", 999, "72-73"],
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["confirmed"] == ["70-71", "72-73"]
+    saved = server._load_dedup()
+    assert "70-71" in saved["1"]
+    assert "72-73" in saved["1"]
+    assert saved["1"]["70-71"]["canonicalProductId"] == 71
+    assert saved["1"]["72-73"]["canonicalProductId"] == 73
+    server.CACHE["estoques"] = []

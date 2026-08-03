@@ -681,7 +681,7 @@ def dedup_confirm():
         return jsonify({"ok": False, "error": "filialId, signature e canonicalProductId sao obrigatorios."}), 400
     try:
         member_ids = _signature_to_ids(signature)
-    except ValueError:
+    except (ValueError, AttributeError, TypeError):
         return jsonify({"ok": False, "error": "signature invalida."}), 400
     if canonical_id not in member_ids:
         return jsonify({"ok": False, "error": "canonicalProductId deve ser um dos membros do grupo."}), 400
@@ -725,7 +725,7 @@ def dedup_bulk_confirm():
         for signature in signatures:
             try:
                 member_ids = _signature_to_ids(signature)
-            except ValueError:
+            except (ValueError, AttributeError, TypeError):
                 continue
             canonical_id = max(member_ids, key=lambda pid: _estoque_sistema(pid, filial_id))
             filial_groups[signature] = {
@@ -759,7 +759,7 @@ def dedup_reject():
         return jsonify({"ok": False, "error": "filialId e signature sao obrigatorios."}), 400
     try:
         member_ids = _signature_to_ids(signature)
-    except ValueError:
+    except (ValueError, AttributeError, TypeError):
         return jsonify({"ok": False, "error": "signature invalida."}), 400
 
     with _dedup_lock:
