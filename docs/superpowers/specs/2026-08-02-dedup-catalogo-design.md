@@ -121,7 +121,9 @@ corrigidas antes do merge:**
   aparentemente gerada internamente quando falta um GTIN de fábrica, com
   colisões pontuais). Corrigido: EAN idêntico só concede o score máximo
   (equivalente a confiança alta) se a descrição normalizada também tiver uma
-  semelhança mínima (`token_sort_ratio` ≥ 30) — abaixo disso, o par cai para
+  semelhança mínima (`token_sort_ratio` ≥ 50 — calibrado empiricamente contra
+  pares reais do catálogo: duplicatas de verdade ficaram entre 69-97, pares
+  sem relação nenhuma entre 26-35, com folga limpa no meio) — abaixo disso, o par cai para
   confiança baixa mesmo com EAN batendo, e vai para revisão individual em vez
   de ser tratado como duplicata óbvia. O sinal `ean_igual` continua sendo
   reportado nesses casos (é informação verdadeira), só não eleva a confiança
