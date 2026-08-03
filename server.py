@@ -517,8 +517,10 @@ def _find_duplicate_candidates(filial_id):
                     # codigo reaproveitado/gerado por engano entre produtos sem nenhuma
                     # relacao (ex: cera depilatoria e alcool com o mesmo EAN). Exigir uma
                     # semelhanca minima de descricao antes de conceder score 100 evita que
-                    # esses pares entrem no lote de aprovacao automatica.
-                    pair_effective_scores.append(100 if score >= 30 else score)
+                    # esses pares entrem no lote de aprovacao automatica. Piso calibrado
+                    # com pares reais do catalogo: duplicatas verdadeiras ficaram >= 69,
+                    # pares sem relacao nenhuma ficaram <= 35 - 50 fica no meio da folga.
+                    pair_effective_scores.append(100 if score >= 50 else score)
                     continue
                 pair_effective_scores.append(score)
                 ncm_a, ncm_b = str(a.get("ncm") or "").strip(), str(b.get("ncm") or "").strip()

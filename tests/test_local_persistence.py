@@ -685,9 +685,10 @@ def test_find_duplicate_candidates_ean_igual_sem_semelhanca_de_descricao_nao_vir
     entre produtos completamente sem relacao - ex.: "MINI VENTILADOR REFHW-2" e
     "COLA PARA CILIOS 0.5S 10 ML SUNNYS-REFSS8801" com o mesmo EAN 7000000091148.
     O sinal ean_igual continua verdadeiro, mas o score efetivo do par so vira 100
-    se a descricao tiver ao menos uma semelhanca minima (piso de 30); abaixo disso,
+    se a descricao tiver ao menos uma semelhanca minima (piso de 50); abaixo disso,
     o par usa o score real, rebaixando a confianca do grupo para "baixa" - evitando
-    que caia no lote de aprovacao automatica de "alta" confianca."""
+    que caia no lote de aprovacao automatica de "alta" confianca. Score real desse
+    par (~26,1) fica bem abaixo do piso."""
     _set_dedup_catalog(
         produtos=[
             {"id": 70, "descricao": "MINI VENTILADOR REFHW-2", "ean": "7000000091148", "ncm": "8414", "marca": "Refresca", "codproduto": "H1"},
@@ -696,6 +697,37 @@ def test_find_duplicate_candidates_ean_igual_sem_semelhanca_de_descricao_nao_vir
         estoques=[
             {"idproduto": 70, "filial": 1, "qtd": 1},
             {"idproduto": 71, "filial": 1, "qtd": 1},
+        ],
+    )
+    candidates = server._find_duplicate_candidates(1)
+    assert len(candidates) == 1
+    assert "ean_igual" in candidates[0]["signals"]
+    assert candidates[0]["confidence"] == "baixa"
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []
+
+
+def test_find_duplicate_candidates_ean_igual_com_semelhanca_fraca_acima_do_piso_antigo_ainda_cai_baixa(client):
+    """Regressao de recalibracao: o par real que motivou o fix do piso original
+    ("CERA QUENTE DEPIL BELA 1KG CONFETE PINK.." / "ALCOOL LIQ. TUPI ZEROBAC 46,2
+    INPM NEUTRO 1L", mesmo EAN real 7898212286724) tem semelhanca de descricao de
+    ~35,3% - MAIOR que o piso antigo de 30 (ou seja, o piso de 30 nao resolvia esse
+    caso), mas MENOR que o piso recalibrado de 50. Confirma que, com o piso novo,
+    esse par cai para confianca "baixa" em vez de "alta"."""
+    _set_dedup_catalog(
+        produtos=[
+            {
+                "id": 80, "descricao": "CERA QUENTE DEPIL BELA 1KG CONFETE PINK..",
+                "ean": "7898212286724", "ncm": "3405", "marca": "Bela", "codproduto": "I1",
+            },
+            {
+                "id": 81, "descricao": "ALCOOL LIQ. TUPI ZEROBAC 46,2 INPM NEUTRO 1L",
+                "ean": "7898212286724", "ncm": "2207", "marca": "Tupi", "codproduto": "I2",
+            },
+        ],
+        estoques=[
+            {"idproduto": 80, "filial": 1, "qtd": 1},
+            {"idproduto": 81, "filial": 1, "qtd": 1},
         ],
     )
     candidates = server._find_duplicate_candidates(1)
