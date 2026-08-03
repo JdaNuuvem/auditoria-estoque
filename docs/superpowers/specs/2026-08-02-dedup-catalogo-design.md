@@ -104,9 +104,36 @@ Para os produtos em estoque de uma filial:
    automaticamente pelo algoritmo — o texto da descrição já reduz o score de
    similaridade nesses casos na prática (unidades/tamanhos diferentes tornam
    as strings menos parecidas). Casos limítrofes caem em confiança
-   média/baixa, indo para revisão individual, nunca aprovação em lote.
+   média/baixa, indo para revisão individual.
+
+**Descobertas durante verificação manual com catálogo real (~19 mil produtos),
+corrigidas antes do merge:**
+
+- O i9logic usa o literal `"SEM GTIN"` no campo EAN para produtos sem código
+  de barras real. Tratado ingenuamente, isso faz o bucketing por EAN igual
+  agrupar **todos** os produtos sem GTIN como se fossem duplicatas entre si
+  (238 produtos formavam um único "mega-grupo" nos testes reais). Corrigido:
+  `"SEM GTIN"` (case-insensitive) é tratado como EAN ausente, nunca como sinal
+  de duplicata.
+- Mesmo excluindo o placeholder acima, o catálogo real tem alguns EANs
+  genuínos (não-placeholder) reaproveitados por engano entre produtos sem
+  nenhuma relação (ex: uma faixa de ~2000 códigos começando em `7000000...`,
+  aparentemente gerada internamente quando falta um GTIN de fábrica, com
+  colisões pontuais). Corrigido: EAN idêntico só concede o score máximo
+  (equivalente a confiança alta) se a descrição normalizada também tiver uma
+  semelhança mínima (`token_sort_ratio` ≥ 30) — abaixo disso, o par cai para
+  confiança baixa mesmo com EAN batendo, e vai para revisão individual em vez
+  de ser tratado como duplicata óbvia. O sinal `ean_igual` continua sendo
+  reportado nesses casos (é informação verdadeira), só não eleva a confiança
+  sozinho.
 
 ## Fluxo de revisão
+
+**Revisado após verificação manual: sem aprovação em lote.** Toda decisão é
+individual, uma de cada vez — decisão do usuário depois de ver, com dado
+real, que "confiança alta" nem sempre é infalível (ver descobertas acima). O
+conceito de confiança (alta/média/baixa) continua existindo só para
+**ordenar** a fila (mais confiável primeiro), não para decidir automação.
 
 Tela nova, só admin (reaproveita `S.isAdmin`/`S.adminPassword` e o padrão de
 autenticação por senha em cada chamada, igual às rotas de admin já
@@ -117,14 +144,14 @@ existentes):
 2. Botão "Analisar Duplicatas" — roda o algoritmo, exclui candidatos cuja
    `signature` já tem decisão (approved ou rejected) persistida para aquela
    filial.
-3. Candidatos de **confiança alta** aparecem destacados com botão
-   "Aprovar todos os óbvios" (aprova em lote; canônico de cada grupo = o
-   membro com maior estoque atual na filial, sem intervenção manual).
-4. Candidatos de **média/baixa confiança** ficam numa fila individual,
-   ordenada da mais pra menos confiável. Cada card mostra os produtos
-   membros lado a lado (descrição, EAN, NCM, marca, estoque atual na filial),
-   com um seletor pré-marcado no de maior estoque (admin pode trocar) e
-   botões Aprovar / Rejeitar.
+3. Todos os candidatos (qualquer nível de confiança) ficam numa única fila,
+   ordenada da mais pra menos confiável. Cada grupo é uma **sanfona
+   (accordion)**: colapsada por padrão, mostrando só um resumo (quantidade de
+   produtos no grupo + nível de confiança); ao expandir, mostra cada produto
+   membro com descrição completa, EAN, NCM, marca e estoque atual na filial.
+4. Dentro do grupo expandido: um seletor pré-marcado no membro de maior
+   estoque (admin pode trocar) e botões Aprovar / Rejeitar — sempre um grupo
+   por vez, sem ação em massa.
 5. Aprovar grava `status: "approved"` com o `canonicalProductId` escolhido.
    Rejeitar grava `status: "rejected"` (sem canônico).
 
@@ -141,9 +168,6 @@ pronto para alguém consolidar manualmente o cadastro real no i9logic depois.
   candidatos novos (não decididos ainda) com membros, confiança e sinais.
 - `POST /api/admin/dedup/confirm` `{adminPassword, filialId, signature,
   canonicalProductId}` → aprova um grupo.
-- `POST /api/admin/dedup/bulk-confirm` `{adminPassword, filialId,
-  signatures: [...]}` → aprova vários de uma vez (canônico = maior estoque
-  em cada, automático).
 - `POST /api/admin/dedup/reject` `{adminPassword, filialId, signature}` →
   rejeita um grupo.
 - `GET /api/dedup/groups?filialId=` → grupos `approved` daquela filial (será
@@ -163,7 +187,9 @@ monkeypatch do `CACHE`, seguindo o padrão de `tests/test_local_persistence.py`)
 - Candidato só é sugerido para uma filial se ela tiver estoque do produto.
 - Aprovar um grupo numa filial não afeta a mesma dupla em outra filial
   (isolamento confirmado pelo usuário).
-- Aprovação em lote grava todos com canônico = maior estoque.
+- EAN igual entre produtos com descrição completamente diferente não gera
+  confiança alta (piso de semelhança de descrição, mesmo com EAN batendo).
+- Placeholder `"SEM GTIN"` (case-insensitive) nunca é tratado como EAN real.
 - Rejeitar persiste e não resurge numa nova análise.
 - `GET /api/dedup/groups` devolve só os grupos `approved` da filial pedida.
 - Todas as rotas de admin exigem `adminPassword` correta (403 caso
