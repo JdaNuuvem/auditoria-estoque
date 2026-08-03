@@ -706,3 +706,109 @@ def test_find_duplicate_candidates_grupo_de_tres_confianca_usa_o_pior_par(client
     assert candidates[0]["confidence"] == "baixa"
     server.CACHE["produtos"] = []
     server.CACHE["estoques"] = []
+
+
+def test_dedup_analyze_exige_senha_admin_correta(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/dedup/analyze", json={"adminPassword": "errada", "filialId": 1})
+    assert resp.status_code == 403
+
+
+def test_dedup_analyze_retorna_candidatos(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    _set_dedup_catalog(
+        produtos=[
+            {"id": 50, "descricao": "Batom Vermelho", "ean": "1", "ncm": "3304", "marca": "X", "codproduto": "E1"},
+            {"id": 51, "descricao": "Batom Vermelho", "ean": "1", "ncm": "3304", "marca": "X", "codproduto": "E2"},
+        ],
+        estoques=[
+            {"idproduto": 50, "filial": 1, "qtd": 1},
+            {"idproduto": 51, "filial": 1, "qtd": 1},
+        ],
+    )
+    resp = client.post("/api/admin/dedup/analyze", json={"adminPassword": "segredo123", "filialId": 1})
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert len(body["candidates"]) == 1
+    assert body["candidates"][0]["signature"] == "50-51"
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []
+
+
+def test_dedup_confirm_persiste_grupo_aprovado(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/dedup/confirm", json={
+        "adminPassword": "segredo123", "filialId": 1, "signature": "60-61", "canonicalProductId": 60,
+    })
+    assert resp.status_code == 200
+    saved = server._load_dedup()
+    assert saved["1"]["60-61"]["status"] == "approved"
+    assert saved["1"]["60-61"]["canonicalProductId"] == 60
+    assert saved["1"]["60-61"]["memberProductIds"] == [60, 61]
+
+
+def test_dedup_confirm_rejeita_canonico_fora_do_grupo(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/dedup/confirm", json={
+        "adminPassword": "segredo123", "filialId": 1, "signature": "60-61", "canonicalProductId": 999,
+    })
+    assert resp.status_code == 400
+
+
+def test_dedup_bulk_confirm_escolhe_canonico_por_maior_estoque(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    server.CACHE["estoques"] = [
+        {"idproduto": 70, "filial": 1, "qtd": 3},
+        {"idproduto": 71, "filial": 1, "qtd": 9},
+    ]
+    resp = client.post("/api/admin/dedup/bulk-confirm", json={
+        "adminPassword": "segredo123", "filialId": 1, "signatures": ["70-71"],
+    })
+    assert resp.status_code == 200
+    saved = server._load_dedup()
+    assert saved["1"]["70-71"]["canonicalProductId"] == 71
+    server.CACHE["estoques"] = []
+
+
+def test_dedup_reject_persiste_grupo_rejeitado(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    resp = client.post("/api/admin/dedup/reject", json={
+        "adminPassword": "segredo123", "filialId": 1, "signature": "80-81",
+    })
+    assert resp.status_code == 200
+    saved = server._load_dedup()
+    assert saved["1"]["80-81"]["status"] == "rejected"
+
+
+def test_dedup_decisoes_sao_isoladas_por_filial(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    client.post("/api/admin/dedup/confirm", json={
+        "adminPassword": "segredo123", "filialId": 1, "signature": "90-91", "canonicalProductId": 90,
+    })
+    saved = server._load_dedup()
+    assert "1" in saved and "90-91" in saved["1"]
+    assert "2" not in saved
+
+
+def test_dedup_groups_devolve_so_aprovados_da_filial_pedida(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "segredo123")
+    server.CACHE["produtos"] = [
+        {"id": 100, "descricao": "Produto A", "ean": "1", "codproduto": "F1"},
+        {"id": 101, "descricao": "Produto A Variante", "ean": "2", "codproduto": "F2"},
+    ]
+    client.post("/api/admin/dedup/confirm", json={
+        "adminPassword": "segredo123", "filialId": 1, "signature": "100-101", "canonicalProductId": 100,
+    })
+    client.post("/api/admin/dedup/reject", json={
+        "adminPassword": "segredo123", "filialId": 1, "signature": "200-201",
+    })
+    resp = client.get("/api/dedup/groups?filialId=1")
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert len(body["groups"]) == 1
+    assert body["groups"][0]["canonicalProductId"] == 100
+    assert len(body["groups"][0]["members"]) == 2
+
+    resp_outra_filial = client.get("/api/dedup/groups?filialId=2")
+    assert resp_outra_filial.get_json()["groups"] == []
+    server.CACHE["produtos"] = []

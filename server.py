@@ -639,6 +639,169 @@ def admin_reset_bipador_password():
     return jsonify({"ok": True})
 
 
+@app.route("/api/admin/dedup/analyze", methods=["POST"])
+def dedup_analyze():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+
+    data = request.get_json(silent=True) or {}
+    admin_password = data.get("adminPassword") or ""
+    if not _admin_password_ok(admin_password):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
+
+    filial_id = data.get("filialId")
+    if filial_id is None:
+        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
+    candidates = _find_duplicate_candidates(filial_id)
+    return jsonify({"ok": True, "candidates": candidates})
+
+
+@app.route("/api/admin/dedup/confirm", methods=["POST"])
+def dedup_confirm():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+
+    data = request.get_json(silent=True) or {}
+    admin_password = data.get("adminPassword") or ""
+    if not _admin_password_ok(admin_password):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
+
+    filial_id = data.get("filialId")
+    signature = data.get("signature")
+    canonical_id = data.get("canonicalProductId")
+    if filial_id is None or not signature or canonical_id is None:
+        return jsonify({"ok": False, "error": "filialId, signature e canonicalProductId sao obrigatorios."}), 400
+    try:
+        member_ids = _signature_to_ids(signature)
+    except ValueError:
+        return jsonify({"ok": False, "error": "signature invalida."}), 400
+    if canonical_id not in member_ids:
+        return jsonify({"ok": False, "error": "canonicalProductId deve ser um dos membros do grupo."}), 400
+
+    with _dedup_lock:
+        dedup = _load_dedup()
+        filial_groups = dedup.setdefault(str(filial_id), {})
+        filial_groups[signature] = {
+            "status": "approved",
+            "memberProductIds": member_ids,
+            "canonicalProductId": canonical_id,
+            "decidedAt": datetime.now().isoformat(),
+        }
+        _save_dedup(dedup)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/dedup/bulk-confirm", methods=["POST"])
+def dedup_bulk_confirm():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+
+    data = request.get_json(silent=True) or {}
+    admin_password = data.get("adminPassword") or ""
+    if not _admin_password_ok(admin_password):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
+
+    filial_id = data.get("filialId")
+    signatures = data.get("signatures")
+    if filial_id is None or not isinstance(signatures, list) or not signatures:
+        return jsonify({"ok": False, "error": "filialId e signatures (lista) sao obrigatorios."}), 400
+
+    with _dedup_lock:
+        dedup = _load_dedup()
+        filial_groups = dedup.setdefault(str(filial_id), {})
+        confirmed = []
+        for signature in signatures:
+            try:
+                member_ids = _signature_to_ids(signature)
+            except ValueError:
+                continue
+            canonical_id = max(member_ids, key=lambda pid: _estoque_sistema(pid, filial_id))
+            filial_groups[signature] = {
+                "status": "approved",
+                "memberProductIds": member_ids,
+                "canonicalProductId": canonical_id,
+                "decidedAt": datetime.now().isoformat(),
+            }
+            confirmed.append(signature)
+        _save_dedup(dedup)
+    return jsonify({"ok": True, "confirmed": confirmed})
+
+
+@app.route("/api/admin/dedup/reject", methods=["POST"])
+def dedup_reject():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+
+    data = request.get_json(silent=True) or {}
+    admin_password = data.get("adminPassword") or ""
+    if not _admin_password_ok(admin_password):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
+
+    filial_id = data.get("filialId")
+    signature = data.get("signature")
+    if filial_id is None or not signature:
+        return jsonify({"ok": False, "error": "filialId e signature sao obrigatorios."}), 400
+    try:
+        member_ids = _signature_to_ids(signature)
+    except ValueError:
+        return jsonify({"ok": False, "error": "signature invalida."}), 400
+
+    with _dedup_lock:
+        dedup = _load_dedup()
+        filial_groups = dedup.setdefault(str(filial_id), {})
+        filial_groups[signature] = {
+            "status": "rejected",
+            "memberProductIds": member_ids,
+            "decidedAt": datetime.now().isoformat(),
+        }
+        _save_dedup(dedup)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/dedup/groups")
+def dedup_groups():
+    filial_id = request.args.get("filialId", type=int)
+    if filial_id is None:
+        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
+    dedup = _load_dedup()
+    filial_groups = dedup.get(str(filial_id), {})
+    produtos_by_id = {p.get("id"): p for p in CACHE.get("produtos", [])}
+    approved = []
+    for signature, group in filial_groups.items():
+        if group.get("status") != "approved":
+            continue
+        members = []
+        for pid in group.get("memberProductIds", []):
+            p = produtos_by_id.get(pid)
+            if p:
+                members.append({
+                    "id": pid, "descricao": p.get("descricao"), "ean": p.get("ean"),
+                    "codproduto": p.get("codproduto"),
+                })
+        approved.append({
+            "signature": signature,
+            "canonicalProductId": group.get("canonicalProductId"),
+            "members": members,
+        })
+    return jsonify({"ok": True, "groups": approved})
+
+
 @app.route("/api/auth/login", methods=["POST"])
 def login():
     ip = request.remote_addr or "unknown"
