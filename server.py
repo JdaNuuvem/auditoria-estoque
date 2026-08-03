@@ -87,14 +87,14 @@ def _paginated_fetch(entity, filter_fn=None, per_page=200):
     all_data = []
     page = 1
     while True:
-        for attempt in range(5):
+        for attempt in range(10):
             _rate_limit()
             resp = requests.get(f"{API_BASE}/{entity}", headers=HEADERS,
                               params={"page": page, "per_page": per_page}, timeout=45)
             body = resp.json()
             if resp.status_code == 429 or (not body.get("ok") and "RATE_LIMIT" in str(body.get("error", ""))):
-                wait = min(2 ** attempt, 60)
-                print(f"[cache] rate-limit em {entity} p{page}, tentativa {attempt+1}/5, aguardando {wait}s...")
+                wait = min(30 * (2 ** attempt), 120)
+                print(f"[cache] rate-limit em {entity} p{page}, tentativa {attempt+1}/10, aguardando {wait}s...")
                 time.sleep(wait)
                 continue
             break
@@ -128,11 +128,11 @@ def refresh_cache():
         CACHE["progress"]["produtos"] = len(produtos)
         print(f"[cache] {len(produtos)} produtos")
         print("[cache] Baixando estoques...")
-        estoques = _paginated_fetch("produtos_estoques")
+        estoques = _paginated_fetch("produtos_estoques", per_page=500)
         CACHE["progress"]["estoques"] = len(estoques)
         print(f"[cache] {len(estoques)} estoques")
         print("[cache] Baixando precos...")
-        precos = _paginated_fetch("precos")
+        precos = _paginated_fetch("precos", per_page=500)
         CACHE["progress"]["precos"] = len(precos)
         print(f"[cache] {len(precos)} precos")
 
