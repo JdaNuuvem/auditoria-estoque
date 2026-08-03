@@ -165,6 +165,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
       <button data-view="reports">Relatórios</button>
       <button data-view="debug">Diagnóstico API</button>
       <button data-view="bipadores" style="display:none">Bipadores</button>
+      <button data-view="dedup" style="display:none">Deduplicação</button>
       <button class="btn-s btn-sm" id="btn-reload-data">Recarregar Dados</button>
     </nav>
   </header>
@@ -281,6 +282,32 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         <div id="bip-error" style="color:var(--d600);font-size:.85rem;display:none;margin-top:8px"></div>
       </div>
       <div id="bipadores-list"></div>
+    </div>
+    <div id="dedup-view" style="display:none">
+      <div class="card" style="margin-bottom:16px">
+        <h3 style="margin-bottom:12px">Deduplicação de Catálogo</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <select id="dedup-filial" style="flex:1;min-width:200px"><option value="">Selecione a loja</option></select>
+          <button class="btn-p" id="btn-dedup-analyze">Analisar Duplicatas</button>
+          <button class="btn-s btn-sm" id="btn-dedup-export">Exportar CSV</button>
+        </div>
+        <div id="dedup-status" style="font-size:.85rem;color:var(--muted);margin-top:8px"></div>
+      </div>
+      <div id="dedup-alta-section" class="card" style="margin-bottom:16px;display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <h4>Confiança Alta (<span id="dedup-alta-count">0</span>)</h4>
+          <button class="btn-s btn-sm" id="btn-dedup-bulk-approve">Aprovar Todos os Óbvios</button>
+        </div>
+        <div id="dedup-alta-list"></div>
+      </div>
+      <div id="dedup-review-section" class="card" style="margin-bottom:16px;display:none">
+        <h4 style="margin-bottom:8px">Revisão Individual</h4>
+        <div id="dedup-review-list"></div>
+      </div>
+      <div class="card">
+        <h4 style="margin-bottom:8px">Grupos Confirmados</h4>
+        <div id="dedup-confirmed-list" class="empty">Selecione uma loja para ver os grupos já confirmados.</div>
+      </div>
     </div>
   </main>
 </div>
@@ -1256,7 +1283,7 @@ function exportCSV() {
 /* ===== VIEW SWITCH ===== */
 async function switchView(view) {
   S.view = view;
-  ['loading-view', 'dashboard-view', 'audit-view', 'reports-view', 'debug-view', 'bipadores-view'].forEach(id => $(`#${id}`).style.display = 'none');
+  ['loading-view', 'dashboard-view', 'audit-view', 'reports-view', 'debug-view', 'bipadores-view', 'dedup-view'].forEach(id => $(`#${id}`).style.display = 'none');
   if (view === 'dashboard') {
     $('#dashboard-view').style.display = 'block';
     renderDashboard();
@@ -1267,6 +1294,7 @@ async function switchView(view) {
   else if (view === 'reports') { $('#reports-view').style.display = 'block'; renderReports(); }
   else if (view === 'debug') { $('#debug-view').style.display = 'block'; pullSyncedProducts(); }
   else if (view === 'bipadores') { $('#bipadores-view').style.display = 'block'; popAdminFilialSelect(); loadBipadoresList(); }
+  else if (view === 'dedup') { $('#dedup-view').style.display = 'block'; popDedupFilialSelect(); }
   else if (view === 'loading') { $('#loading-view').style.display = 'flex'; }
   $$('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
 }
@@ -1384,7 +1412,7 @@ async function handleAdminLogin() {
 }
 
 function updateNavForRole() {
-  const adminOnly = ['bipadores'];
+  const adminOnly = ['bipadores', 'dedup'];
   const bipadorOnly = ['dashboard', 'audit', 'reports', 'debug'];
   $$('nav button[data-view]').forEach(b => {
     const v = b.dataset.view;
@@ -1394,11 +1422,179 @@ function updateNavForRole() {
   $('#btn-reload-data').style.display = S.isAdmin ? 'none' : '';
 }
 
-function popAdminFilialSelect() {
-  const sel = $('#bip-filial');
+function popAdminFilialSelect(selector = '#bip-filial') {
+  const sel = $(selector);
   if (!sel) return;
   sel.innerHTML = '<option value="">Selecione a loja</option>' +
     S.filiais.map(f => `<option value="${f.id}">${f.fantasia || f.razaosocial} (${fmt(f.codigo)})</option>`).join('');
+}
+
+function popDedupFilialSelect() {
+  popAdminFilialSelect('#dedup-filial');
+}
+
+let dedupCandidates = [];
+let dedupConfirmedGroups = [];
+
+async function handleAnalyzeDuplicates() {
+  const filialId = Number($('#dedup-filial').value);
+  if (!filialId) { toast('Selecione uma loja primeiro.', 'warn'); return; }
+  $('#dedup-status').textContent = 'Analisando...';
+  try {
+    const resp = await fetch('/api/admin/dedup/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassword: S.adminPassword, filialId }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro: ' + r.error, 'err'); $('#dedup-status').textContent = ''; return; }
+    dedupCandidates = r.candidates || [];
+    renderDedupCandidates();
+    $('#dedup-status').textContent = dedupCandidates.length
+      ? `${dedupCandidates.length} grupo(s) candidato(s) encontrado(s).`
+      : 'Nenhuma duplicata nova encontrada.';
+    loadConfirmedDedupGroups(filialId);
+  } catch (e) {
+    toast('Falha ao analisar — verifique sua conexão.', 'err');
+    $('#dedup-status').textContent = '';
+  }
+}
+
+function renderDedupCandidates() {
+  const alta = dedupCandidates.filter(c => c.confidence === 'alta');
+  const outros = dedupCandidates.filter(c => c.confidence !== 'alta');
+
+  $('#dedup-alta-section').style.display = alta.length ? 'block' : 'none';
+  $('#dedup-alta-count').textContent = alta.length;
+  $('#dedup-alta-list').innerHTML = alta.map(c => `
+    <div class="recent-row" style="cursor:default">
+      <span>${c.members.map(m => escapeHtml(m.descricao)).join(' + ')}</span>
+      <span style="color:var(--muted);font-size:.75rem">${escapeHtml(c.signals.join(', '))}</span>
+    </div>
+  `).join('');
+
+  $('#dedup-review-section').style.display = outros.length ? 'block' : 'none';
+  $('#dedup-review-list').innerHTML = outros.map(c => {
+    const defaultCanonical = c.members.reduce((a, b) => (b.estoqueFilial > a.estoqueFilial ? b : a)).id;
+    return `
+    <div class="card" style="margin-bottom:12px;border:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span class="badge ${c.confidence === 'media' ? 'bg-pendente' : 'bg-nao-encontrado'}">${c.confidence}</span>
+        <span style="color:var(--muted);font-size:.75rem">${escapeHtml(c.signals.join(', '))}</span>
+      </div>
+      ${c.members.map(m => `
+        <label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+          <input type="radio" name="canonical-${c.signature}" value="${m.id}" ${m.id === defaultCanonical ? 'checked' : ''}>
+          <span style="flex:1">${escapeHtml(m.descricao)} <span style="color:var(--muted);font-size:.75rem">(SKU ${escapeHtml(m.codproduto || '-')}, EAN ${escapeHtml(m.ean || '-')}, estoque ${m.estoqueFilial})</span></span>
+        </label>
+      `).join('')}
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn-s btn-sm" data-dedup-confirm="${c.signature}">Aprovar</button>
+        <button class="btn-o btn-sm" data-dedup-reject="${c.signature}">Rejeitar</button>
+      </div>
+    </div>
+  `;
+  }).join('');
+}
+
+async function handleBulkApproveDedup() {
+  const filialId = Number($('#dedup-filial').value);
+  const signatures = dedupCandidates.filter(c => c.confidence === 'alta').map(c => c.signature);
+  if (!signatures.length) return;
+  try {
+    const resp = await fetch('/api/admin/dedup/bulk-confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassword: S.adminPassword, filialId, signatures }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro: ' + r.error, 'err'); return; }
+    dedupCandidates = dedupCandidates.filter(c => !signatures.includes(c.signature));
+    renderDedupCandidates();
+    toast(`${r.confirmed.length} grupo(s) aprovado(s).`, 'ok');
+    loadConfirmedDedupGroups(filialId);
+  } catch (e) {
+    toast('Falha ao aprovar em lote — verifique sua conexão.', 'err');
+  }
+}
+
+async function handleConfirmDedupGroup(signature) {
+  const filialId = Number($('#dedup-filial').value);
+  const radio = document.querySelector(`input[name="canonical-${signature}"]:checked`);
+  const canonicalProductId = radio ? Number(radio.value) : null;
+  if (!canonicalProductId) { toast('Selecione o produto canônico.', 'warn'); return; }
+  try {
+    const resp = await fetch('/api/admin/dedup/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassword: S.adminPassword, filialId, signature, canonicalProductId }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro: ' + r.error, 'err'); return; }
+    dedupCandidates = dedupCandidates.filter(c => c.signature !== signature);
+    renderDedupCandidates();
+    toast('Grupo aprovado.', 'ok');
+    loadConfirmedDedupGroups(filialId);
+  } catch (e) {
+    toast('Falha ao aprovar — verifique sua conexão.', 'err');
+  }
+}
+
+async function handleRejectDedupGroup(signature) {
+  const filialId = Number($('#dedup-filial').value);
+  try {
+    const resp = await fetch('/api/admin/dedup/reject', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassword: S.adminPassword, filialId, signature }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro: ' + r.error, 'err'); return; }
+    dedupCandidates = dedupCandidates.filter(c => c.signature !== signature);
+    renderDedupCandidates();
+    toast('Grupo rejeitado.', 'ok');
+  } catch (e) {
+    toast('Falha ao rejeitar — verifique sua conexão.', 'err');
+  }
+}
+
+async function loadConfirmedDedupGroups(filialId) {
+  try {
+    const r = await apiGet('dedup/groups', { filialId });
+    dedupConfirmedGroups = r.groups || [];
+    $('#dedup-confirmed-list').className = dedupConfirmedGroups.length ? '' : 'empty';
+    $('#dedup-confirmed-list').innerHTML = dedupConfirmedGroups.length
+      ? dedupConfirmedGroups.map(g => `
+        <div class="recent-row" style="cursor:default">
+          <span>${g.members.map(m => escapeHtml(m.descricao)).join(' + ')}</span>
+          <span style="color:var(--muted);font-size:.75rem">canônico: ${escapeHtml(String(g.canonicalProductId))}</span>
+        </div>
+      `).join('')
+      : 'Nenhum grupo confirmado ainda nesta loja.';
+  } catch (e) {
+    dedupConfirmedGroups = [];
+  }
+}
+
+function exportDedupCSV() {
+  const filialId = Number($('#dedup-filial').value);
+  if (!filialId || !dedupConfirmedGroups.length) { toast('Nenhum grupo confirmado para exportar.', 'warn'); return; }
+  const filial = S.filiais.find(f => f.id === filialId);
+  const headers = ['Grupo', 'ID Produto', 'SKU', 'Descrição', 'EAN', 'Canônico'];
+  const rows = [];
+  dedupConfirmedGroups.forEach((g, i) => {
+    g.members.forEach(m => {
+      rows.push([i + 1, m.id, fmt(m.codproduto), fmt(m.descricao).replace(/,/g, ' '), fmt(m.ean), m.id === g.canonicalProductId ? 'Sim' : 'Não']);
+    });
+  });
+  const csv = [headers, ...rows].map(r => r.map(v => '"' + (v ?? '') + '"').join(',')).join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'dedup_' + (filial ? (filial.fantasia || filial.razaosocial).replace(/\s/g, '_') : 'loja') + '_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 async function loadBipadoresList() {
@@ -1635,6 +1831,15 @@ async function init() {
 
   // Event: export
   $('#btn-export-csv').addEventListener('click', exportCSV);
+  $('#btn-dedup-analyze').addEventListener('click', handleAnalyzeDuplicates);
+  $('#btn-dedup-bulk-approve').addEventListener('click', handleBulkApproveDedup);
+  $('#btn-dedup-export').addEventListener('click', exportDedupCSV);
+  $('#dedup-review-list').addEventListener('click', (e) => {
+    const confirmBtn = e.target.closest('[data-dedup-confirm]');
+    if (confirmBtn) { handleConfirmDedupGroup(confirmBtn.dataset.dedupConfirm); return; }
+    const rejectBtn = e.target.closest('[data-dedup-reject]');
+    if (rejectBtn) { handleRejectDedupGroup(rejectBtn.dataset.dedupReject); return; }
+  });
 
   // Event: debug
   $('#btn-test-connection').addEventListener('click', testConnection);
