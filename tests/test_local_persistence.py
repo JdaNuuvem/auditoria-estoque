@@ -677,3 +677,32 @@ def test_find_duplicate_candidates_exclui_signature_ja_decidida(client):
     assert candidates == []
     server.CACHE["produtos"] = []
     server.CACHE["estoques"] = []
+
+
+def test_find_duplicate_candidates_grupo_de_tres_confianca_usa_o_pior_par(client):
+    """Regressao: produto 50-51 tem EAN igual (par forte), mas 51-52 so se une por
+    ncm+marca com similaridade fraca de descricao (~63%, abaixo de 75). A confianca
+    do grupo final {50,51,52} deve refletir o PIOR par, nao o melhor - ou seja, nao
+    pode sair "alta" so porque um dos pares tem EAN identico."""
+    _set_dedup_catalog(
+        produtos=[
+            {"id": 50, "descricao": "Vela Aromatica Lavanda", "ean": "111", "ncm": "9000", "marca": "Aroma", "codproduto": "F1"},
+            {"id": 51, "descricao": "Perfume Floral Doce 100ml", "ean": "111", "ncm": "3303", "marca": "Aroma", "codproduto": "F2"},
+            {"id": 52, "descricao": "Perfume Amadeirado Intenso 100ml", "ean": "222", "ncm": "3303", "marca": "Aroma", "codproduto": "F3"},
+        ],
+        estoques=[
+            {"idproduto": 50, "filial": 1, "qtd": 1},
+            {"idproduto": 51, "filial": 1, "qtd": 1},
+            {"idproduto": 52, "filial": 1, "qtd": 1},
+        ],
+    )
+    candidates = server._find_duplicate_candidates(1)
+    assert len(candidates) == 1
+    assert candidates[0]["memberProductIds"] == [50, 51, 52]
+    assert candidates[0]["signature"] == "50-51-52"
+    assert "ean_igual" in candidates[0]["signals"]
+    assert "ncm_marca_iguais" in candidates[0]["signals"]
+    assert candidates[0]["confidence"] != "alta"
+    assert candidates[0]["confidence"] == "baixa"
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []

@@ -445,7 +445,6 @@ def _find_duplicate_candidates(filial_id):
     decided = _load_dedup().get(str(filial_id), {})
 
     uf = _UnionFind(by_id.keys())
-    pair_scores = {}
 
     by_ean = {}
     for p in products:
@@ -476,8 +475,6 @@ def _find_duplicate_candidates(filial_id):
                 )
                 if score >= 60:
                     uf.union(a["id"], b["id"])
-                    key = tuple(sorted((a["id"], b["id"])))
-                    pair_scores[key] = score
 
     components = {}
     for pid in by_id:
@@ -493,28 +490,34 @@ def _find_duplicate_candidates(filial_id):
             continue
 
         signals_set = set()
-        min_desc_score = None
-        has_ean_match = False
+        pair_effective_scores = []
         for i in range(len(member_ids)):
             for j in range(i + 1, len(member_ids)):
                 a_id, b_id = member_ids[i], member_ids[j]
                 a, b = by_id[a_id], by_id[b_id]
                 ean_a, ean_b = str(a.get("ean") or "").strip(), str(b.get("ean") or "").strip()
                 if ean_a and ean_a == ean_b:
-                    has_ean_match = True
                     signals_set.add("ean_igual")
-                key = tuple(sorted((a_id, b_id)))
-                if key in pair_scores:
+                    pair_effective_scores.append(100)
+                    continue
+                score = fuzz.token_sort_ratio(
+                    _normalize_descricao(a.get("descricao")),
+                    _normalize_descricao(b.get("descricao")),
+                )
+                pair_effective_scores.append(score)
+                ncm_a, ncm_b = str(a.get("ncm") or "").strip(), str(b.get("ncm") or "").strip()
+                marca_a, marca_b = str(a.get("marca") or "").strip(), str(b.get("marca") or "").strip()
+                if ncm_a and ncm_a == ncm_b and marca_a and marca_a == marca_b:
                     signals_set.add("ncm_marca_iguais")
-                    score = pair_scores[key]
-                    min_desc_score = score if min_desc_score is None else min(min_desc_score, score)
+                if score >= 90:
+                    signals_set.add("descricao_muito_similar")
 
-        if has_ean_match:
+        # Confiança do grupo = pior par (min), nunca o melhor: um unico par fracamente
+        # relacionado (mesmo que so transitivamente no mesmo grupo) rebaixa o grupo inteiro.
+        min_score = min(pair_effective_scores) if pair_effective_scores else 0
+        if min_score >= 90:
             confidence = "alta"
-        elif min_desc_score is not None and min_desc_score >= 90:
-            confidence = "alta"
-            signals_set.add("descricao_muito_similar")
-        elif min_desc_score is not None and min_desc_score >= 75:
+        elif min_score >= 75:
             confidence = "media"
         else:
             confidence = "baixa"
