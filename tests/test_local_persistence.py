@@ -686,9 +686,8 @@ def test_find_duplicate_candidates_ean_igual_sem_semelhanca_de_descricao_nao_vir
     "COLA PARA CILIOS 0.5S 10 ML SUNNYS-REFSS8801" com o mesmo EAN 7000000091148.
     O sinal ean_igual continua verdadeiro, mas o score efetivo do par so vira 100
     se a descricao tiver ao menos uma semelhanca minima (piso de 50); abaixo disso,
-    o par usa o score real, rebaixando a confianca do grupo para "baixa" - evitando
-    que caia no lote de aprovacao automatica de "alta" confianca. Score real desse
-    par (~26,1) fica bem abaixo do piso."""
+    o par usa o score real, rebaixando a confianca do grupo para "baixa" em vez de
+    "alta". Score real das descricoes deste teste (~20,9) fica bem abaixo do piso."""
     _set_dedup_catalog(
         produtos=[
             {"id": 70, "descricao": "MINI VENTILADOR REFHW-2", "ean": "7000000091148", "ncm": "8414", "marca": "Refresca", "codproduto": "H1"},
