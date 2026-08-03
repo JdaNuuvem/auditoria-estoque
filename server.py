@@ -715,46 +715,6 @@ def dedup_confirm():
     return jsonify({"ok": True})
 
 
-@app.route("/api/admin/dedup/bulk-confirm", methods=["POST"])
-def dedup_bulk_confirm():
-    ip = request.remote_addr or "unknown"
-    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
-    if limited:
-        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
-
-    data = request.get_json(silent=True) or {}
-    admin_password = data.get("adminPassword") or ""
-    if not _admin_password_ok(admin_password):
-        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
-        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
-    _admin_login_attempts.pop(ip, None)
-
-    filial_id = data.get("filialId")
-    signatures = data.get("signatures")
-    if filial_id is None or not isinstance(signatures, list) or not signatures:
-        return jsonify({"ok": False, "error": "filialId e signatures (lista) sao obrigatorios."}), 400
-
-    with _dedup_lock:
-        dedup = _load_dedup()
-        filial_groups = dedup.setdefault(str(filial_id), {})
-        confirmed = []
-        for signature in signatures:
-            try:
-                member_ids = _signature_to_ids(signature)
-            except (ValueError, AttributeError, TypeError):
-                continue
-            canonical_id = max(member_ids, key=lambda pid: _estoque_sistema(pid, filial_id))
-            filial_groups[signature] = {
-                "status": "approved",
-                "memberProductIds": member_ids,
-                "canonicalProductId": canonical_id,
-                "decidedAt": datetime.now().isoformat(),
-            }
-            confirmed.append(signature)
-        _save_dedup(dedup)
-    return jsonify({"ok": True, "confirmed": confirmed})
-
-
 @app.route("/api/admin/dedup/reject", methods=["POST"])
 def dedup_reject():
     ip = request.remote_addr or "unknown"

@@ -293,16 +293,9 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         </div>
         <div id="dedup-status" style="font-size:.85rem;color:var(--muted);margin-top:8px"></div>
       </div>
-      <div id="dedup-alta-section" class="card" style="margin-bottom:16px;display:none">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
-          <h4>Confiança Alta (<span id="dedup-alta-count">0</span>)</h4>
-          <button class="btn-s btn-sm" id="btn-dedup-bulk-approve">Aprovar Todos os Óbvios</button>
-        </div>
-        <div id="dedup-alta-list"></div>
-      </div>
-      <div id="dedup-review-section" class="card" style="margin-bottom:16px;display:none">
-        <h4 style="margin-bottom:8px">Revisão Individual</h4>
-        <div id="dedup-review-list"></div>
+      <div id="dedup-candidates-section" class="card" style="margin-bottom:16px;display:none">
+        <h4 style="margin-bottom:8px">Candidatos a Duplicata (<span id="dedup-candidates-count">0</span>)</h4>
+        <div id="dedup-candidates-list"></div>
       </div>
       <div class="card">
         <h4 style="margin-bottom:8px">Grupos Confirmados</h4>
@@ -1441,10 +1434,8 @@ function resetDedupState() {
   dedupCandidates = [];
   dedupConfirmedGroups = [];
   $('#dedup-status').textContent = '';
-  $('#dedup-alta-section').style.display = 'none';
-  $('#dedup-alta-list').innerHTML = '';
-  $('#dedup-review-section').style.display = 'none';
-  $('#dedup-review-list').innerHTML = '';
+  $('#dedup-candidates-section').style.display = 'none';
+  $('#dedup-candidates-list').innerHTML = '';
   $('#dedup-confirmed-list').className = 'empty';
   $('#dedup-confirmed-list').innerHTML = 'Selecione uma loja para ver os grupos já confirmados.';
 }
@@ -1474,62 +1465,32 @@ async function handleAnalyzeDuplicates() {
 }
 
 function renderDedupCandidates() {
-  const alta = dedupCandidates.filter(c => c.confidence === 'alta');
-  const outros = dedupCandidates.filter(c => c.confidence !== 'alta');
-
-  $('#dedup-alta-section').style.display = alta.length ? 'block' : 'none';
-  $('#dedup-alta-count').textContent = alta.length;
-  $('#dedup-alta-list').innerHTML = alta.map(c => `
-    <div class="recent-row" style="cursor:default">
-      <span>${c.members.map(m => escapeHtml(m.descricao)).join(' + ')}</span>
-      <span style="color:var(--muted);font-size:.75rem">${escapeHtml(c.signals.join(', '))}</span>
-    </div>
-  `).join('');
-
-  $('#dedup-review-section').style.display = outros.length ? 'block' : 'none';
-  $('#dedup-review-list').innerHTML = outros.map(c => {
+  $('#dedup-candidates-section').style.display = dedupCandidates.length ? 'block' : 'none';
+  $('#dedup-candidates-count').textContent = dedupCandidates.length;
+  $('#dedup-candidates-list').innerHTML = dedupCandidates.map(c => {
     const defaultCanonical = c.members.reduce((a, b) => (b.estoqueFilial > a.estoqueFilial ? b : a)).id;
+    const badgeClass = c.confidence === 'alta' ? 'bg-encontrado' : c.confidence === 'media' ? 'bg-pendente' : 'bg-nao-encontrado';
     return `
-    <div class="card" style="margin-bottom:12px;border:1px solid var(--border)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <span class="badge ${c.confidence === 'media' ? 'bg-pendente' : 'bg-nao-encontrado'}">${c.confidence}</span>
-        <span style="color:var(--muted);font-size:.75rem">${escapeHtml(c.signals.join(', '))}</span>
+    <details class="card" style="margin-bottom:12px;border:1px solid var(--border)">
+      <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <span>${c.members.length} produtos possivelmente duplicados</span>
+        <span><span class="badge ${badgeClass}">${c.confidence}</span> <span style="color:var(--muted);font-size:.75rem">${escapeHtml(c.signals.join(', '))}</span></span>
+      </summary>
+      <div style="margin-top:10px">
+        ${c.members.map(m => `
+          <label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+            <input type="radio" name="canonical-${c.signature}" value="${m.id}" ${m.id === defaultCanonical ? 'checked' : ''}>
+            <span style="flex:1">${escapeHtml(m.descricao)} <span style="color:var(--muted);font-size:.75rem">(SKU ${escapeHtml(m.codproduto || '-')}, EAN ${escapeHtml(m.ean || '-')}, estoque ${m.estoqueFilial})</span></span>
+          </label>
+        `).join('')}
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn-s btn-sm" data-dedup-confirm="${c.signature}">Aprovar</button>
+          <button class="btn-o btn-sm" data-dedup-reject="${c.signature}">Rejeitar</button>
+        </div>
       </div>
-      ${c.members.map(m => `
-        <label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-          <input type="radio" name="canonical-${c.signature}" value="${m.id}" ${m.id === defaultCanonical ? 'checked' : ''}>
-          <span style="flex:1">${escapeHtml(m.descricao)} <span style="color:var(--muted);font-size:.75rem">(SKU ${escapeHtml(m.codproduto || '-')}, EAN ${escapeHtml(m.ean || '-')}, estoque ${m.estoqueFilial})</span></span>
-        </label>
-      `).join('')}
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="btn-s btn-sm" data-dedup-confirm="${c.signature}">Aprovar</button>
-        <button class="btn-o btn-sm" data-dedup-reject="${c.signature}">Rejeitar</button>
-      </div>
-    </div>
+    </details>
   `;
   }).join('');
-}
-
-async function handleBulkApproveDedup() {
-  const filialId = Number($('#dedup-filial').value);
-  if (!filialId) { toast('Selecione uma loja primeiro.', 'warn'); return; }
-  const signatures = dedupCandidates.filter(c => c.confidence === 'alta').map(c => c.signature);
-  if (!signatures.length) return;
-  try {
-    const resp = await fetch('/api/admin/dedup/bulk-confirm', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ adminPassword: S.adminPassword, filialId, signatures }),
-    });
-    const r = await resp.json();
-    if (!r.ok) { toast('Erro: ' + r.error, 'err'); return; }
-    dedupCandidates = dedupCandidates.filter(c => !signatures.includes(c.signature));
-    renderDedupCandidates();
-    toast(`${r.confirmed.length} grupo(s) aprovado(s).`, 'ok');
-    loadConfirmedDedupGroups(filialId);
-  } catch (e) {
-    toast('Falha ao aprovar em lote — verifique sua conexão.', 'err');
-  }
 }
 
 async function handleConfirmDedupGroup(signature) {
@@ -1848,10 +1809,9 @@ async function init() {
   // Event: export
   $('#btn-export-csv').addEventListener('click', exportCSV);
   $('#btn-dedup-analyze').addEventListener('click', handleAnalyzeDuplicates);
-  $('#btn-dedup-bulk-approve').addEventListener('click', handleBulkApproveDedup);
   $('#btn-dedup-export').addEventListener('click', exportDedupCSV);
   $('#dedup-filial').addEventListener('change', resetDedupState);
-  $('#dedup-review-list').addEventListener('click', (e) => {
+  $('#dedup-candidates-list').addEventListener('click', (e) => {
     const confirmBtn = e.target.closest('[data-dedup-confirm]');
     if (confirmBtn) { handleConfirmDedupGroup(confirmBtn.dataset.dedupConfirm); return; }
     const rejectBtn = e.target.closest('[data-dedup-reject]');
