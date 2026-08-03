@@ -1478,9 +1478,12 @@ function renderDedupCandidates() {
       </summary>
       <div style="margin-top:10px">
         ${c.members.map(m => `
-          <label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-            <input type="radio" name="canonical-${c.signature}" value="${m.id}" ${m.id === defaultCanonical ? 'checked' : ''}>
-            <span style="flex:1">${escapeHtml(m.descricao)} <span style="color:var(--muted);font-size:.75rem">(SKU ${escapeHtml(m.codproduto || '-')}, EAN ${escapeHtml(m.ean || '-')}, estoque ${m.estoqueFilial})</span></span>
+          <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer">
+            <input type="radio" name="canonical-${c.signature}" value="${m.id}" ${m.id === defaultCanonical ? 'checked' : ''} style="width:auto;flex-shrink:0;margin-top:3px">
+            <span style="flex:1;min-width:0">
+              <div style="font-weight:600">${escapeHtml(m.descricao)}</div>
+              <div style="color:var(--muted);font-size:.75rem;margin-top:2px">SKU ${escapeHtml(m.codproduto || '-')} · EAN ${escapeHtml(m.ean || '-')} · estoque ${m.estoqueFilial}</div>
+            </span>
           </label>
         `).join('')}
         <div style="display:flex;gap:8px;margin-top:8px">
