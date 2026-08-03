@@ -507,14 +507,19 @@ def _find_duplicate_candidates(filial_id):
                 a_id, b_id = member_ids[i], member_ids[j]
                 a, b = by_id[a_id], by_id[b_id]
                 ean_a, ean_b = _ean_valida(a.get("ean")), _ean_valida(b.get("ean"))
-                if ean_a and ean_a == ean_b:
-                    signals_set.add("ean_igual")
-                    pair_effective_scores.append(100)
-                    continue
                 score = fuzz.token_sort_ratio(
                     _normalize_descricao(a.get("descricao")),
                     _normalize_descricao(b.get("descricao")),
                 )
+                if ean_a and ean_a == ean_b:
+                    signals_set.add("ean_igual")
+                    # EAN identico e um sinal forte, mas o catalogo real tem casos de
+                    # codigo reaproveitado/gerado por engano entre produtos sem nenhuma
+                    # relacao (ex: cera depilatoria e alcool com o mesmo EAN). Exigir uma
+                    # semelhanca minima de descricao antes de conceder score 100 evita que
+                    # esses pares entrem no lote de aprovacao automatica.
+                    pair_effective_scores.append(100 if score >= 30 else score)
+                    continue
                 pair_effective_scores.append(score)
                 ncm_a, ncm_b = str(a.get("ncm") or "").strip(), str(b.get("ncm") or "").strip()
                 marca_a, marca_b = str(a.get("marca") or "").strip(), str(b.get("marca") or "").strip()

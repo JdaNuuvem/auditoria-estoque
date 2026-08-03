@@ -679,6 +679,33 @@ def test_find_duplicate_candidates_exclui_signature_ja_decidida(client):
     server.CACHE["estoques"] = []
 
 
+def test_find_duplicate_candidates_ean_igual_sem_semelhanca_de_descricao_nao_vira_alta(client):
+    """Regressao com dado real de producao: no catalogo da CHARME COSMETICOS ha
+    colisoes reais e pontuais de EAN (nao o placeholder "SEM GTIN", ja tratado)
+    entre produtos completamente sem relacao - ex.: "MINI VENTILADOR REFHW-2" e
+    "COLA PARA CILIOS 0.5S 10 ML SUNNYS-REFSS8801" com o mesmo EAN 7000000091148.
+    O sinal ean_igual continua verdadeiro, mas o score efetivo do par so vira 100
+    se a descricao tiver ao menos uma semelhanca minima (piso de 30); abaixo disso,
+    o par usa o score real, rebaixando a confianca do grupo para "baixa" - evitando
+    que caia no lote de aprovacao automatica de "alta" confianca."""
+    _set_dedup_catalog(
+        produtos=[
+            {"id": 70, "descricao": "MINI VENTILADOR REFHW-2", "ean": "7000000091148", "ncm": "8414", "marca": "Refresca", "codproduto": "H1"},
+            {"id": 71, "descricao": "COLA PARA CILIOS 0.5S 10 ML SUNNYS-REFSS8801", "ean": "7000000091148", "ncm": "3506", "marca": "Sunnys", "codproduto": "H2"},
+        ],
+        estoques=[
+            {"idproduto": 70, "filial": 1, "qtd": 1},
+            {"idproduto": 71, "filial": 1, "qtd": 1},
+        ],
+    )
+    candidates = server._find_duplicate_candidates(1)
+    assert len(candidates) == 1
+    assert "ean_igual" in candidates[0]["signals"]
+    assert candidates[0]["confidence"] == "baixa"
+    server.CACHE["produtos"] = []
+    server.CACHE["estoques"] = []
+
+
 def test_find_duplicate_candidates_grupo_de_tres_confianca_usa_o_pior_par(client):
     """Regressao: produto 50-51 tem EAN igual (par forte), mas 51-52 so se une por
     ncm+marca com similaridade fraca de descricao (~63%, abaixo de 75). A confianca
