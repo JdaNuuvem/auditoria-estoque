@@ -87,9 +87,16 @@ def _paginated_fetch(entity, filter_fn=None, per_page=200):
     all_data = []
     page = 1
     while True:
-        _rate_limit()
-        resp = requests.get(f"{API_BASE}/{entity}", headers=HEADERS,
-                          params={"page": page, "per_page": per_page}, timeout=45)
+        for attempt in range(5):
+            _rate_limit()
+            resp = requests.get(f"{API_BASE}/{entity}", headers=HEADERS,
+                              params={"page": page, "per_page": per_page}, timeout=45)
+            if resp.status_code == 429:
+                wait = min(2 ** attempt, 60)
+                print(f"[cache] 429 em {entity} p{page}, tentativa {attempt+1}/5, aguardando {wait}s...")
+                time.sleep(wait)
+                continue
+            break
         body = resp.json()
         if not body.get("ok"):
             raise RuntimeError(f"Falha ao buscar '{entity}' pagina {page}: {body.get('error') or resp.status_code}")
