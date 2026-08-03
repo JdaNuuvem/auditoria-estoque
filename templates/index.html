@@ -1431,10 +1431,23 @@ function popAdminFilialSelect(selector = '#bip-filial') {
 
 function popDedupFilialSelect() {
   popAdminFilialSelect('#dedup-filial');
+  resetDedupState();
 }
 
 let dedupCandidates = [];
 let dedupConfirmedGroups = [];
+
+function resetDedupState() {
+  dedupCandidates = [];
+  dedupConfirmedGroups = [];
+  $('#dedup-status').textContent = '';
+  $('#dedup-alta-section').style.display = 'none';
+  $('#dedup-alta-list').innerHTML = '';
+  $('#dedup-review-section').style.display = 'none';
+  $('#dedup-review-list').innerHTML = '';
+  $('#dedup-confirmed-list').className = 'empty';
+  $('#dedup-confirmed-list').innerHTML = 'Selecione uma loja para ver os grupos já confirmados.';
+}
 
 async function handleAnalyzeDuplicates() {
   const filialId = Number($('#dedup-filial').value);
@@ -1499,6 +1512,7 @@ function renderDedupCandidates() {
 
 async function handleBulkApproveDedup() {
   const filialId = Number($('#dedup-filial').value);
+  if (!filialId) { toast('Selecione uma loja primeiro.', 'warn'); return; }
   const signatures = dedupCandidates.filter(c => c.confidence === 'alta').map(c => c.signature);
   if (!signatures.length) return;
   try {
@@ -1520,6 +1534,7 @@ async function handleBulkApproveDedup() {
 
 async function handleConfirmDedupGroup(signature) {
   const filialId = Number($('#dedup-filial').value);
+  if (!filialId) { toast('Selecione uma loja primeiro.', 'warn'); return; }
   const radio = document.querySelector(`input[name="canonical-${signature}"]:checked`);
   const canonicalProductId = radio ? Number(radio.value) : null;
   if (!canonicalProductId) { toast('Selecione o produto canônico.', 'warn'); return; }
@@ -1542,6 +1557,7 @@ async function handleConfirmDedupGroup(signature) {
 
 async function handleRejectDedupGroup(signature) {
   const filialId = Number($('#dedup-filial').value);
+  if (!filialId) { toast('Selecione uma loja primeiro.', 'warn'); return; }
   try {
     const resp = await fetch('/api/admin/dedup/reject', {
       method: 'POST',
@@ -1834,6 +1850,7 @@ async function init() {
   $('#btn-dedup-analyze').addEventListener('click', handleAnalyzeDuplicates);
   $('#btn-dedup-bulk-approve').addEventListener('click', handleBulkApproveDedup);
   $('#btn-dedup-export').addEventListener('click', exportDedupCSV);
+  $('#dedup-filial').addEventListener('change', resetDedupState);
   $('#dedup-review-list').addEventListener('click', (e) => {
     const confirmBtn = e.target.closest('[data-dedup-confirm]');
     if (confirmBtn) { handleConfirmDedupGroup(confirmBtn.dataset.dedupConfirm); return; }
