@@ -19,6 +19,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "AUDIT_FILE", str(tmp_path / "audit_sessions.json"))
     monkeypatch.setattr(server, "CACHE_FILE", str(tmp_path / "cache_data.json"))
     monkeypatch.setattr(server, "USERS_FILE", str(tmp_path / "users.json"))
+    monkeypatch.setattr(server, "DEDUP_FILE", str(tmp_path / "dedup_groups.json"))
     monkeypatch.setattr(server, "_admin_login_attempts", {})
     monkeypatch.setattr(server, "_bipador_login_attempts", {})
     server._save_users({
@@ -544,3 +545,36 @@ def test_admin_login_senha_ausente_ou_vazia_e_rejeitada(client, monkeypatch):
     resp2 = client.post("/api/admin/login", json={"password": ""})
     assert resp2.status_code == 401
     assert resp2.get_json()["ok"] is False
+
+
+def test_normalize_descricao_remove_acentos_maiusculas_espacos_extras():
+    assert server._normalize_descricao("  Shampoo   REPARAÇÃO Intensa  ") == "shampoo reparacao intensa"
+
+
+def test_normalize_descricao_lida_com_none_e_vazio():
+    assert server._normalize_descricao(None) == ""
+    assert server._normalize_descricao("") == ""
+
+
+def test_group_signature_ordena_ids_numericamente():
+    assert server._group_signature([456, 123]) == "123-456"
+    assert server._group_signature([10, 2]) == "2-10"
+
+
+def test_signature_to_ids_reverte_group_signature():
+    assert server._signature_to_ids("123-456") == [123, 456]
+
+
+def test_signature_to_ids_rejeita_formato_invalido():
+    with pytest.raises(ValueError):
+        server._signature_to_ids("abc-123")
+
+
+def test_load_dedup_arquivo_inexistente_retorna_dict_vazio(client):
+    assert server._load_dedup() == {}
+
+
+def test_save_e_load_dedup_faz_roundtrip(client):
+    data = {"1": {"123-456": {"status": "approved", "memberProductIds": [123, 456], "canonicalProductId": 123}}}
+    server._save_dedup(data)
+    assert server._load_dedup() == data

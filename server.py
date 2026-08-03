@@ -3,6 +3,7 @@ import json
 import os
 import time
 import threading
+import unicodedata
 from datetime import date, datetime
 import requests
 from dotenv import load_dotenv
@@ -54,8 +55,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 CACHE_FILE = os.path.join(DATA_DIR, "cache_data.json")
 AUDIT_FILE = os.path.join(DATA_DIR, "audit_sessions.json")
+DEDUP_FILE = os.path.join(DATA_DIR, "dedup_groups.json")
 _audit_lock = threading.Lock()
 _users_lock = threading.Lock()
+_dedup_lock = threading.Lock()
 
 HEADERS = {
     "X-Client-Id": CLIENT_ID,
@@ -385,6 +388,34 @@ def audit_count():
         "diferenca": entry["qtd"] - qtd_sistema,
         "qtdSistemaDisponivel": bool(CACHE.get("estoques")),
     })
+
+
+def _normalize_descricao(text):
+    text = str(text or "")
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    return " ".join(text.split())
+
+
+def _group_signature(product_ids):
+    return "-".join(str(pid) for pid in sorted(product_ids))
+
+
+def _signature_to_ids(signature):
+    return [int(x) for x in signature.split("-")]
+
+
+def _load_dedup():
+    try:
+        with open(DEDUP_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_dedup(data):
+    with open(DEDUP_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def _load_users():
