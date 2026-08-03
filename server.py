@@ -469,24 +469,6 @@ def _find_duplicate_candidates(filial_id):
         for other in ids[1:]:
             uf.union(base, other)
 
-    by_ncm_marca = {}
-    for p in products:
-        ncm = str(p.get("ncm") or "").strip()
-        marca = str(p.get("marca") or "").strip()
-        if ncm and marca:
-            by_ncm_marca.setdefault((ncm, marca), []).append(p)
-
-    for group in by_ncm_marca.values():
-        for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                a, b = group[i], group[j]
-                score = fuzz.token_sort_ratio(
-                    _normalize_descricao(a.get("descricao")),
-                    _normalize_descricao(b.get("descricao")),
-                )
-                if score >= 60:
-                    uf.union(a["id"], b["id"])
-
     components = {}
     for pid in by_id:
         root = uf.find(pid)
@@ -511,6 +493,8 @@ def _find_duplicate_candidates(filial_id):
                     _normalize_descricao(a.get("descricao")),
                     _normalize_descricao(b.get("descricao")),
                 )
+                if score >= 90:
+                    signals_set.add("descricao_muito_similar")
                 if ean_a and ean_a == ean_b:
                     signals_set.add("ean_igual")
                     # EAN identico e um sinal forte, mas o catalogo real tem casos de
@@ -524,12 +508,6 @@ def _find_duplicate_candidates(filial_id):
                     pair_effective_scores.append(100 if score >= 50 else score)
                     continue
                 pair_effective_scores.append(score)
-                ncm_a, ncm_b = str(a.get("ncm") or "").strip(), str(b.get("ncm") or "").strip()
-                marca_a, marca_b = str(a.get("marca") or "").strip(), str(b.get("marca") or "").strip()
-                if ncm_a and ncm_a == ncm_b and marca_a and marca_a == marca_b:
-                    signals_set.add("ncm_marca_iguais")
-                if score >= 90:
-                    signals_set.add("descricao_muito_similar")
 
         # Confiança do grupo = pior par (min), nunca o melhor: um unico par fracamente
         # relacionado (mesmo que so transitivamente no mesmo grupo) rebaixa o grupo inteiro.
@@ -656,6 +634,39 @@ def admin_reset_bipador_password():
         users[email]["password_hash"] = generate_password_hash(password)
         _save_users(users)
     return jsonify({"ok": True})
+
+
+@app.route("/api/admin/bipadores/update-filial", methods=["POST"])
+def admin_update_bipador_filial():
+    ip = request.remote_addr or "unknown"
+    limited, count, window_start = _rate_limited(_admin_login_attempts, ip)
+    if limited:
+        return jsonify({"ok": False, "error": "Muitas tentativas. Tente novamente em alguns minutos."}), 429
+
+    data = request.get_json(silent=True) or {}
+    admin_password = data.get("adminPassword") or ""
+    if not _admin_password_ok(admin_password):
+        _record_failed_attempt(_admin_login_attempts, ip, count, window_start)
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    _admin_login_attempts.pop(ip, None)
+
+    email = (data.get("email") or "").strip().lower()
+    filial_id = data.get("filialId")
+    if not email or filial_id is None:
+        return jsonify({"ok": False, "error": "Email e filialId sao obrigatorios."}), 400
+
+    filial = next((f for f in CACHE.get("filiais", []) if f["id"] == filial_id), None)
+    if not filial:
+        return jsonify({"ok": False, "error": "Loja nao encontrada."}), 400
+
+    with _users_lock:
+        users = _load_users()
+        if email not in users:
+            return jsonify({"ok": False, "error": "Bipador nao encontrado."}), 404
+        users[email]["filialId"] = filial_id
+        _save_users(users)
+
+    return jsonify({"ok": True, "filialId": filial_id, "filialNome": filial["fantasia"] or filial["razaosocial"]})
 
 
 @app.route("/api/admin/dedup/analyze", methods=["POST"])

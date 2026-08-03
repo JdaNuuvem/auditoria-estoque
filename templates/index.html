@@ -1594,6 +1594,9 @@ async function loadBipadoresList() {
           <div class="recent-row" style="cursor:default">
             <span>${escapeHtml(u.name)}</span>
             <span style="color:var(--muted);font-size:.75rem">${escapeHtml(u.email)}</span>
+            <select data-update-filial="${escapeHtml(u.email)}" style="font-size:.75rem;max-width:180px">
+            ${S.filiais.map(f => `<option value="${f.id}" ${f.id === u.filialId ? 'selected' : ''}>${escapeHtml(f.fantasia || f.razaosocial)}</option>`).join('')}
+            </select>
             <button class="btn-s btn-sm" data-reset-email="${escapeHtml(u.email)}">Redefinir senha</button>
           </div>
         `).join('') : '<div class="empty" style="padding:8px">Nenhum bipador cadastrado.</div>'}
@@ -1646,6 +1649,22 @@ async function handleResetBipadorPassword(email) {
     toast('Senha redefinida com sucesso.', 'ok');
   } catch (e) {
     toast('Falha ao redefinir senha — verifique sua conexão.', 'err');
+  }
+}
+
+async function handleUpdateBipadorFilial(email, filialId) {
+  try {
+    const resp = await fetch('/api/admin/bipadores/update-filial', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassword: S.adminPassword, email, filialId }),
+    });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro: ' + r.error, 'err'); return; }
+    toast('Loja alterada para ' + r.filialNome, 'ok');
+    loadBipadoresList();
+  } catch (e) {
+    toast('Falha ao alterar loja — verifique sua conexão.', 'err');
   }
 }
 
@@ -1741,6 +1760,13 @@ async function init() {
     const btn = e.target.closest('[data-reset-email]');
     if (!btn) return;
     handleResetBipadorPassword(btn.dataset.resetEmail);
+  });
+
+  // Event: change bipador filial (delegated)
+  $('#bipadores-list').addEventListener('change', (e) => {
+    const sel = e.target.closest('[data-update-filial]');
+    if (!sel) return;
+    handleUpdateBipadorFilial(sel.dataset.updateFilial, Number(sel.value));
   });
 
   // Event: logout
