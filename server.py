@@ -52,11 +52,13 @@ def _record_failed_attempt(bucket, key, count, window_start):
 
 
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 os.makedirs(DATA_DIR, exist_ok=True)
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 CACHE_FILE = os.path.join(DATA_DIR, "cache_data.json")
 AUDIT_FILE = os.path.join(DATA_DIR, "audit_sessions.json")
 DEDUP_FILE = os.path.join(DATA_DIR, "dedup_groups.json")
+SEED_CACHE_FILE = os.path.join(APP_DIR, "cache_data.json")  # bundled with Docker image
 _audit_lock = threading.Lock()
 _users_lock = threading.Lock()
 _dedup_lock = threading.Lock()
@@ -173,6 +175,22 @@ def _load_cache_from_disk():
     CACHE["estoques"] = data.get("estoques", [])
     CACHE["precos"] = data.get("precos", [])
     CACHE["synced_at"] = data.get("synced_at")
+    CACHE["ready"] = bool(CACHE["produtos"])
+    return CACHE["ready"]
+
+
+def _load_cache_from_seed():
+    """Load cache bundled in the Docker image (cache_data.json in app directory)."""
+    try:
+        with open(SEED_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    CACHE["filiais"] = data.get("filiais", [])
+    CACHE["produtos"] = data.get("produtos", [])
+    CACHE["estoques"] = data.get("estoques", [])
+    CACHE["precos"] = data.get("precos", [])
+    CACHE["synced_at"] = data.get("synced_at", "bundled")
     CACHE["ready"] = bool(CACHE["produtos"])
     return CACHE["ready"]
 
@@ -902,6 +920,9 @@ if __name__ == "__main__":
         else:
             print("Cache em disco vazio, iniciando sincronizacao com API...")
             threading.Thread(target=refresh_cache, daemon=True).start()
+    elif _load_cache_from_seed():
+        print(f"Cache carregado do seed: {len(CACHE['produtos'])} produtos. Salvando no volume...")
+        _save_cache_to_disk()
     else:
         threading.Thread(target=refresh_cache, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False)
