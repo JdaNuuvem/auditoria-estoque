@@ -1,5 +1,47 @@
 # Dashboard com dados reais + relatório por loja — Design
 
+## Estado atual (achado ao escrever o plano)
+
+`templates/index.html` já tinha, sem commit, uma implementação parcial que resolve
+boa parte deste documento com uma arquitetura ligeiramente diferente da descrita
+abaixo — mais simples, e reaproveitada entre Dashboard/Relatórios/Auditoria:
+
+- Um único seletor de loja **no cabeçalho** (`#hdr-filial-select`, visível só pra
+  admin), em vez de um dropdown dentro da aba Auditoria. Controla o que o admin vê
+  em Dashboard, Relatórios e Auditoria ao mesmo tempo.
+- `currentViewSession()` = `S.session` pro bipador comum, ou
+  `getLatestSessionForFilial(S.viewFilialId)` pro admin (sessão mais recente da
+  loja escolhida no seletor). Substitui a `activeAuditSession()` planejada.
+- `getLatestSessionForFilial(filialId)` já existe e faz exatamente o que a seção
+  "Aba Auditoria" abaixo descrevia.
+- Clique numa loja em "Progresso por Loja" (`viewFilialReport`) já seleciona a
+  loja no seletor do cabeçalho e leva para **Relatórios** (não para Auditoria)
+  com o filtro "Encontrados" — reaproveita a tabela/paginação/export que já
+  existem lá em vez de duplicar em Auditoria. `exportCSV()` já existe nessa aba.
+- Auditoria (Produtos Existentes/Estoque Contado) já lê de `currentViewSession()`
+  e já esconde os controles de edição (`-1`/`+1`/input) quando quem está vendo
+  não é o dono da sessão (`editable = session === S.session`).
+
+O que falta e este plano cobre:
+1. **Cards do topo do Dashboard continuam errados**: usam `getAuditStats()` →
+   `currentViewSession()`, ou seja, ficam zerados até o admin escolher uma loja
+   no seletor. Isso contradiz a decisão já aprovada (métrica agregada = produtos
+   únicos vistos, somando todas as lojas, sem precisar selecionar nenhuma).
+   Precisam de uma função de agregação global nova, usada só no Dashboard.
+2. **CSV do relatório "Encontrados" não tem as colunas decididas** (Horário do
+   1º bipe, Qtd Contada, Estoque Sistema, Diferença) — hoje exporta só
+   SKU/Descrição/EAN/Categoria/Fornecedor/Tipo/Ativo/Encontrado, igual aos
+   outros relatórios do catálogo.
+3. Pequeno polish: aba "Bipagem" dentro de Auditoria continua clicável pro
+   admin (sem sessão, então bipar já falha com toast — não quebra nada, mas é
+   uma sub-aba sem função pra ele); e quando o admin não selecionou loja
+   nenhuma, Produtos Existentes/Estoque Contado mostram listas vazias sem
+   dizer por quê.
+
+As seções originais abaixo ficam como registro da intenção; a implementação
+seguiu a arquitetura já existente no arquivo (seletor único no cabeçalho) em
+vez de um dropdown dedicado dentro da aba Auditoria.
+
 ## Contexto
 
 O Dashboard do admin mostra "Cadastrados / Produtos Existentes / Estoque Contado /
