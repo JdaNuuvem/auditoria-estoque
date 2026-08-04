@@ -1329,10 +1329,13 @@ function showClassReport(className) {
 /* ===== EXPORT ===== */
 function exportCSV() {
   const viewSession = currentViewSession();
+  const isEncontrados = currentReport === 'encontrados' && viewSession;
   const headers = ['SKU', 'Descrição', 'EAN', 'Categoria', 'Fornecedor', 'Tipo', 'Ativo', 'Encontrado'];
+  if (isEncontrados) headers.push('Horário 1º Bipe', 'Qtd Contada', 'Estoque Sistema', 'Diferença');
   const rows = reportData.map(p => {
-    const found = viewSession && viewSession.encontrados[p.id] ? 'Sim' : 'Não';
-    return [
+    const entry = viewSession ? viewSession.encontrados[p.id] : null;
+    const found = entry ? 'Sim' : 'Não';
+    const row = [
       fmt(p.codproduto),
       fmt(p.descricao).replace(/,/g, ' '),
       fmt(p.ean),
@@ -1342,6 +1345,17 @@ function exportCSV() {
       p.ativo === '0' ? 'Não' : 'Sim',
       found,
     ];
+    if (isEncontrados) {
+      const qtd = entry && entry.qtd != null ? entry.qtd : null;
+      const estoqueSistema = S.stockMap[viewSession.filialId + '_' + p.id] || 0;
+      row.push(
+        entry ? entry.scannedAt : '',
+        qtd != null ? qtd : '',
+        estoqueSistema,
+        qtd != null ? qtd - estoqueSistema : '',
+      );
+    }
+    return row;
   });
   const csv = [headers, ...rows].map(r => r.map(v => '"' + (v || '') + '"').join(',')).join('\n');
   const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
