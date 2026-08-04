@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+users.json
 audit_sessions.json
 dedup_groups.json
 server.log
