@@ -86,19 +86,23 @@ produto, que variam bastante em ordem).
 
 Para os produtos em estoque de uma filial:
 
-1. **Bucketing por sinais fortes** (barato, evita O(n²) no catálogo inteiro):
-   - Mesmo EAN não-vazio cadastrado em 2+ produtos diferentes → bucket próprio,
-     confiança **alta** direto (sinal `ean_igual`).
-   - Mesmo NCM + mesma marca (ambos não-vazios) → bucket candidato.
-2. **Dentro de cada bucket** (exceto o de EAN igual, que já é decidido): pontua
-   similaridade da descrição normalizada (minúsculas, sem acento, espaços
-   colapsados) via `rapidfuzz.fuzz.token_sort_ratio` (tolera ordem de palavras
-   trocada).
-   - Score ≥ 90 → confiança **alta** (sinal `descricao_muito_similar` +
-     `ncm_marca_iguais`).
-   - Score ≥ 75 → confiança **média**.
-   - Score ≥ 60 → confiança **baixa**.
-   - Abaixo de 60 → descartado, não vira candidato.
+1. **Bucketing por EAN idêntico** (única forma de virar candidato — é a
+   única detecção que existe; ver descoberta abaixo sobre o eixo NCM+marca,
+   removido): mesmo EAN não-vazio cadastrado em 2+ produtos diferentes → todos
+   unidos no mesmo componente candidato via union-find (barato, evita O(n²) no
+   catálogo inteiro).
+2. **Dentro de cada componente**: pontua similaridade da descrição
+   normalizada (minúsculas, sem acento, espaços colapsados) via
+   `rapidfuzz.fuzz.token_sort_ratio` (tolera ordem de palavras trocada) para
+   cada par de produtos do grupo.
+   - Score ≥ 90 → sinal `descricao_muito_similar` no par.
+   - EAN idêntico concede score efetivo 100 ao par **se** a descrição também
+     tiver semelhança mínima (`token_sort_ratio` ≥ 50 — ver calibração
+     empírica abaixo); abaixo do piso, o par usa o score real de descrição
+     mesmo com EAN batendo.
+   - A confiança do grupo inteiro usa o PIOR par (nunca o melhor):
+     `min_score` entre todos os pares do grupo. `min_score` ≥ 90 → confiança
+     **alta**; ≥ 75 → **média**; abaixo disso → **baixa**.
 3. Produtos com descrição muito similar mas **tamanho/variação diferente**
    detectável no texto (ex: "500ml" vs "1L", "P" vs "G") não são penalizados
    automaticamente pelo algoritmo — o texto da descrição já reduz o score de
@@ -128,6 +132,12 @@ corrigidas antes do merge:**
   de ser tratado como duplicata óbvia. O sinal `ean_igual` continua sendo
   reportado nesses casos (é informação verdadeira), só não eleva a confiança
   sozinho.
+- `marca` está preenchida em apenas 3 de 19.133 produtos do catálogo real
+  (~0,02%) — o eixo de bucketing por NCM+marca nunca formou um único bucket
+  de 2+ produtos em produção: dos 153 candidatos reais observados em 5
+  filiais, 100% vieram do bucketing por EAN idêntico sozinho. Decisão: o eixo
+  NCM+marca foi **removido** do código e da detecção (não mantido como um
+  no-op documentado) — a detecção é EAN-idêntico apenas.
 
 ## Fluxo de revisão
 
@@ -182,8 +192,8 @@ Suite pytest (Flask test client, catálogo de teste pequeno e controlado via
 monkeypatch do `CACHE`, seguindo o padrão de `tests/test_local_persistence.py`):
 
 - Bucketing por EAN igual gera candidato de confiança alta.
-- Bucketing por NCM+marca+descrição similar gera candidato de confiança
-  média/baixa conforme o score.
+- Bucketing por NCM+marca+descrição similar, sem EAN compartilhado, NÃO gera
+  candidato (EAN idêntico é o único eixo de detecção).
 - Produtos genuinamente diferentes (descrição, NCM e marca distintos) não
   geram candidato.
 - Candidato só é sugerido para uma filial se ela tiver estoque do produto.

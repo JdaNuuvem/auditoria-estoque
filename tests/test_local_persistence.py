@@ -347,11 +347,12 @@ def test_proxy_generico_da_api_nao_existe_mais(client):
 
 def test_paginated_fetch_levanta_erro_em_resposta_nao_ok(monkeypatch):
     class FakeResp:
-        status_code = 429
+        status_code = 400
         def json(self):
-            return {"ok": False, "error": "RATE_LIMITED"}
+            return {"ok": False, "error": "OUTRO_ERRO"}
 
     monkeypatch.setattr(server, "_rate_limit", lambda: None)
+    monkeypatch.setattr(server.time, "sleep", lambda _: None)
     monkeypatch.setattr(server.requests, "get", lambda *a, **k: FakeResp())
 
     with pytest.raises(RuntimeError):
@@ -609,6 +610,14 @@ def test_find_duplicate_candidates_detecta_ean_identico(client):
 
 
 def test_find_duplicate_candidates_detecta_ncm_marca_descricao_similar(client):
+    """Regressao da remocao do eixo NCM+marca: dado real de catalogo
+    (cache_data.json, 19.133 produtos) mostrou marca preenchida em apenas 3
+    produtos (0,02%), tornando o bucketing por NCM+marca codigo morto na
+    pratica - dos 153 candidatos reais observados em 5 filiais, 100% vieram
+    do bucketing por EAN identico. O eixo foi removido em vez de mantido como
+    no-op inerte: dois produtos com EAN diferente, mesmo NCM+marca e descricao
+    quase identica agora NAO formam candidato, porque a deteccao passou a ser
+    exclusivamente por EAN identico."""
     _set_dedup_catalog(
         produtos=[
             {"id": 10, "descricao": "Shampoo Reparação Intensa 500ml", "ean": "1", "ncm": "3305", "marca": "Beleza", "codproduto": "S1"},
@@ -620,9 +629,7 @@ def test_find_duplicate_candidates_detecta_ncm_marca_descricao_similar(client):
         ],
     )
     candidates = server._find_duplicate_candidates(1)
-    assert len(candidates) == 1
-    assert candidates[0]["confidence"] in ("alta", "media")
-    assert "ncm_marca_iguais" in candidates[0]["signals"]
+    assert candidates == []
     server.CACHE["produtos"] = []
     server.CACHE["estoques"] = []
 
@@ -738,15 +745,24 @@ def test_find_duplicate_candidates_ean_igual_com_semelhanca_fraca_acima_do_piso_
 
 
 def test_find_duplicate_candidates_grupo_de_tres_confianca_usa_o_pior_par(client):
-    """Regressao: produto 50-51 tem EAN igual (par forte), mas 51-52 so se une por
-    ncm+marca com similaridade fraca de descricao (~63%, abaixo de 75). A confianca
-    do grupo final {50,51,52} deve refletir o PIOR par, nao o melhor - ou seja, nao
-    pode sair "alta" so porque um dos pares tem EAN identico."""
+    """Regressao: com o eixo NCM+marca removido, os 3 produtos so se unem no
+    mesmo componente porque compartilham o MESMO EAN ("111") - bucketing por
+    EAN e agora a unica forma de virar candidato. Produto 50 e 51 sao variantes
+    quase identicas da mesma vela ("Vela Aromatica Lavanda" / "Vela Aromatica
+    Lavanda 200g"); score real de token_sort_ratio (rapidfuzz, apos
+    normalizacao igual a _normalize_descricao: lowercase, sem acento, espacos
+    colapsados) = 89.79591836734694 -> >= 50, entao o par 50-51 recebe score
+    efetivo 100 (EAN igual + semelhanca suficiente). Produto 52 e um perfume
+    sem relacao com a vela: score real 50-52 = 33.333333333333336 e score real
+    51-52 = 40.67796610169492 - ambos abaixo do piso de 50, entao o score
+    efetivo desses pares fica o score bruto mesmo com EAN igual. A confianca do
+    grupo final {50,51,52} deve refletir o PIOR par (min ~33.33, "baixa"), nao
+    o melhor par (100, que sozinho pareceria "alta")."""
     _set_dedup_catalog(
         produtos=[
             {"id": 50, "descricao": "Vela Aromatica Lavanda", "ean": "111", "ncm": "9000", "marca": "Aroma", "codproduto": "F1"},
-            {"id": 51, "descricao": "Perfume Floral Doce 100ml", "ean": "111", "ncm": "3303", "marca": "Aroma", "codproduto": "F2"},
-            {"id": 52, "descricao": "Perfume Amadeirado Intenso 100ml", "ean": "222", "ncm": "3303", "marca": "Aroma", "codproduto": "F3"},
+            {"id": 51, "descricao": "Vela Aromatica Lavanda 200g", "ean": "111", "ncm": "9000", "marca": "Aroma", "codproduto": "F2"},
+            {"id": 52, "descricao": "Perfume Amadeirado Intenso 100ml", "ean": "111", "ncm": "3303", "marca": "Aroma", "codproduto": "F3"},
         ],
         estoques=[
             {"idproduto": 50, "filial": 1, "qtd": 1},
@@ -759,7 +775,6 @@ def test_find_duplicate_candidates_grupo_de_tres_confianca_usa_o_pior_par(client
     assert candidates[0]["memberProductIds"] == [50, 51, 52]
     assert candidates[0]["signature"] == "50-51-52"
     assert "ean_igual" in candidates[0]["signals"]
-    assert "ncm_marca_iguais" in candidates[0]["signals"]
     assert candidates[0]["confidence"] != "alta"
     assert candidates[0]["confidence"] == "baixa"
     server.CACHE["produtos"] = []
