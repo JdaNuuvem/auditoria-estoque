@@ -157,6 +157,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
       <h1>Auditoria</h1>
       <span style="font-size:.75rem;background:var(--p50);color:var(--p700);padding:3px 10px;border-radius:20px" id="hdr-filial">--</span>
       <span style="font-size:.75rem;color:var(--muted)" id="hdr-auditor">--</span>
+      <select id="hdr-filial-select" style="display:none;max-width:220px"><option value="">Ver dados de qual loja?</option></select>
       <button class="btn-o btn-sm" id="btn-logout" style="margin-left:8px">Sair</button>
     </div>
     <nav>
@@ -177,6 +178,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
     </div>
     <!-- DASHBOARD -->
     <div id="dashboard-view" style="display:none">
+      <div id="dash-stats-hint"></div>
       <div class="dash-grid" id="dash-stats"></div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px">
         <div class="card">
@@ -347,6 +349,7 @@ let S = {
   pricesMap: {},
   session: null,
   allSessions: [],
+  viewFilialId: null, // loja que o admin esta visualizando no Dashboard/Relatorios/Auditoria (somente leitura)
   cameraStream: null,
   cameraActive: false,
   barcodeDetector: null,
@@ -589,9 +592,16 @@ function resolveProduct(code) {
 
 /* ===== CLASSIFICATION ===== */
 function getProductStatus(p) {
-  if (!S.session) return 'pendente';
-  if (S.session.encontrados[p.id]) return 'encontrado';
+  const session = currentViewSession();
+  if (!session) return 'pendente';
+  if (session.encontrados[p.id]) return 'encontrado';
   return 'pendente';
+}
+
+// Filial cujo estoque deve ser exibido: a do proprio bipador, ou a que o
+// admin esta visualizando no seletor do cabecalho.
+function currentViewFilialId() {
+  return S.isAdmin ? S.viewFilialId : S.user.filialId;
 }
 
 function getGlobalClassifications() {
@@ -639,9 +649,34 @@ function getGlobalClassifications() {
 
 /* ===== AUDIT STATS ===== */
 function getAuditStats() {
+  const session = currentViewSession();
   const total = S.products.length;
-  const found = S.session ? Object.keys(S.session.encontrados).length : 0;
-  const contados = S.session ? Object.values(S.session.encontrados).filter(r => r.qtd != null).length : 0;
+  const found = session ? Object.keys(session.encontrados).length : 0;
+  const contados = session ? Object.values(session.encontrados).filter(r => r.qtd != null).length : 0;
+  const pending = total - found;
+  const pct = total > 0 ? Math.round((found / total) * 100) : 0;
+  return { total, found, contados, pending, pct };
+}
+
+// Agregado real do Dashboard: produtos UNICOS vistos/contados em qualquer
+// loja, entre todas as sessoes do servidor (S.allSessions) - nao depende de
+// qual usuario esta logado nem de qual loja o admin selecionou no seletor do
+// cabecalho. Um produto bipado em 3 lojas diferentes conta 1 vez aqui
+// (cobertura do catalogo), nao 3 (isso seria volume de trabalho, nao
+// cobertura). Ao contrario de getAuditStats()/currentViewSession(), nunca
+// fica zerado esperando o admin selecionar uma loja.
+function getGlobalAuditStats() {
+  const foundIds = new Set();
+  const countedIds = new Set();
+  for (const s of S.allSessions) {
+    for (const [pid, entry] of Object.entries(s.encontrados || {})) {
+      foundIds.add(pid);
+      if (entry.qtd != null) countedIds.add(pid);
+    }
+  }
+  const total = S.products.length;
+  const found = foundIds.size;
+  const contados = countedIds.size;
   const pending = total - found;
   const pct = total > 0 ? Math.round((found / total) * 100) : 0;
   return { total, found, contados, pending, pct };
@@ -652,16 +687,45 @@ function getProgressByFilial() {
   const map = {};
   for (const s of sessions) {
     const fId = s.filialId;
-    if (!map[fId]) map[fId] = { filialId: fId, filialNome: s.filialNome, totalFound: 0, sessions: 0 };
-    map[fId].totalFound += Object.keys(s.encontrados || {}).length;
+    if (!map[fId]) map[fId] = { filialId: fId, filialNome: s.filialNome, sessions: 0 };
     map[fId].sessions++;
   }
   const total = S.products.length;
-  return Object.values(map).map(m => ({
-    ...m,
-    total,
-    pct: Math.round((m.totalFound / total) * 100),
-  }));
+  // totalFound = produtos DISTINTOS ja encontrados na loja (merge de todas as
+  // sessoes, ver getMergedSessionForFilial) - nao soma bruta por sessao, que
+  // conta o mesmo produto 2x se ele aparecer em mais de uma sessao da loja
+  // (ex: reauditado em outro dia, ou sessoes duplicadas do mesmo dia).
+  return Object.values(map).map(m => {
+    const totalFound = Object.keys(getMergedSessionForFilial(m.filialId).encontrados).length;
+    return { ...m, totalFound, total, pct: Math.round((totalFound / total) * 100) };
+  });
+}
+
+// Uma loja pode ter mais de uma sessao real (uma por dia em que foi
+// auditada - audit_session_start reusa a sessao do dia, mas dias diferentes
+// viram sessoes diferentes). Pra mostrar o total JA encontrado naquela loja
+// (nao so o de hoje), mescla o "encontrados" de TODAS as sessoes da loja,
+// em ordem cronologica - se o mesmo produto aparecer em mais de uma sessao,
+// a entrada mais recente vence (contagem mais atual). Isso mantem o numero
+// consistente com getProgressByFilial (que soma o total encontrado por
+// loja). Nao confundir com S.session, que e a sessao PESSOAL de quem esta
+// logado (so existe pra bipador, que a cria ao logar; admin nunca cria uma).
+function getMergedSessionForFilial(filialId) {
+  if (filialId == null) return null;
+  const matches = S.allSessions.filter(s => s.filialId === filialId);
+  if (!matches.length) return null;
+  const ordenadas = matches.slice().sort((a, b) => (a.data + a.inicio).localeCompare(b.data + b.inicio));
+  const encontrados = {};
+  ordenadas.forEach(s => Object.assign(encontrados, s.encontrados || {}));
+  return { id: 'merged_' + filialId, filialId, encontrados };
+}
+
+// Fonte de dados pros paineis de leitura (Dashboard/Relatorios/abas de
+// Produtos Existentes e Estoque Contado): bipador sempre ve sua propria
+// sessao ativa (S.session, como sempre foi); admin ve os dados reais da
+// loja escolhida no seletor do cabecalho (S.viewFilialId), somente leitura.
+function currentViewSession() {
+  return S.isAdmin ? getMergedSessionForFilial(S.viewFilialId) : S.session;
 }
 
 /* ===== PROCESS SCAN/CONTAGEM (fluxo unico) ===== */
@@ -732,7 +796,7 @@ function playBuzzer() {
 /* ===== PRODUCT DETAIL PANEL ===== */
 function showProductDetails(p) {
   if (!p) return;
-  const stockQty = S.stockMap[S.user.filialId + '_' + p.id] || 0;
+  const stockQty = S.stockMap[currentViewFilialId() + '_' + p.id] || 0;
   const priceData = S.pricesMap[p.id];
   const ean = fmt(p.ean) || '(sem código)';
   const status = getProductStatus(p);
@@ -1030,12 +1094,17 @@ function syncCountToServer(productId, ean, descricao, payload) {
 }
 
 function renderCountList() {
-  if (!S.session) return;
+  const session = currentViewSession();
+  if (!session) { $('#count-total').textContent = '0'; $('#count-list').innerHTML = ''; return; }
+  // Somente o bipador dono da sessao pode editar contagem por aqui; admin
+  // visualizando a sessao real de uma loja (currentViewSession() != S.session)
+  // ve os mesmos dados, mas sem os controles de +1/-1/edicao manual.
+  const editable = session === S.session;
   // Entradas criadas por bipagem/contagem sempre têm a chave `qtd`; entradas
   // criadas só pela Verificação (markFound/audit_scan) nunca têm — por isso
   // `qtd != null` distingue "contado (mesmo que 0)" de "só verificado",
   // permitindo mostrar uma contagem zerada em vez de escondê-la da lista.
-  const entries = Object.entries(S.session.encontrados).filter(([, r]) => r.qtd != null);
+  const entries = Object.entries(session.encontrados).filter(([, r]) => r.qtd != null);
   $('#count-total').textContent = entries.length;
   // Mesmo padrão de updateAuditUI: mais recente primeiro (ordem de inserção
   // das chaves reversa) e lista limitada a 100 linhas.
@@ -1044,6 +1113,12 @@ function renderCountList() {
     const semDados = r.qtdSistemaDisponivel === false;
     const sistemaTxt = semDados ? '—' : (r.qtdSistema != null ? r.qtdSistema : '...');
     const diferencaTxt = semDados ? '—' : (r.diferenca != null ? (r.diferenca > 0 ? '+' : '') + r.diferenca : '...');
+    const controls = editable ? `
+        <button class="btn-o btn-sm" onclick="applyCountDelta(${id}, -1)">-1</button>
+        <input type="number" min="0" value="${r.qtd}" style="width:70px;text-align:center"
+               onchange="setCountForProduct(${id}, parseInt(this.value)||0)">
+        <button class="btn-o btn-sm" onclick="applyCountDelta(${id}, 1)">+1</button>` : `
+        <strong style="width:70px;text-align:center">${r.qtd}</strong>`;
     return `
     <div class="recent-row" style="flex-direction:column;align-items:stretch;gap:6px;cursor:default">
       <div style="display:flex;justify-content:space-between">
@@ -1051,10 +1126,7 @@ function renderCountList() {
         <span style="color:var(--muted);font-size:.75rem">${r.ean}</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <button class="btn-o btn-sm" onclick="applyCountDelta(${id}, -1)">-1</button>
-        <input type="number" min="0" value="${r.qtd}" style="width:70px;text-align:center"
-               onchange="setCountForProduct(${id}, parseInt(this.value)||0)">
-        <button class="btn-o btn-sm" onclick="applyCountDelta(${id}, 1)">+1</button>
+        ${controls}
         <span style="font-size:.8rem;color:var(--muted)">
           Sistema: ${sistemaTxt} | Diferença: ${diferencaTxt}
         </span>
@@ -1080,13 +1152,14 @@ function switchAuditPanel(panel) {
 
 /* ===== UI UPDATES ===== */
 function updateAuditUI() {
-  if (!S.session) return;
-  const found = Object.keys(S.session.encontrados);
+  const session = currentViewSession();
+  if (!session) { $('#found-count').textContent = '0'; $('#recent-scans-list').innerHTML = ''; return; }
+  const found = Object.keys(session.encontrados);
   $('#found-count').textContent = found.length;
   const list = $('#recent-scans-list');
   const items = found.reverse().slice(0, 100);
   list.innerHTML = items.map(id => {
-    const r = S.session.encontrados[id];
+    const r = session.encontrados[id];
     return `<div class="recent-row" onclick="showProductDetailsById(${id})">
       <span><strong>${r.scannedAt}</strong> - ${r.descricao}</span>
       <span style="color:var(--muted);font-size:.75rem">${r.ean}</span>
@@ -1100,10 +1173,11 @@ function updateDashboardUI() {
 }
 
 function renderDashboard() {
-  const st = getAuditStats();
+  const st = getGlobalAuditStats();
   const cls = getGlobalClassifications();
   const byFilial = getProgressByFilial();
 
+  $('#dash-stats-hint').innerHTML = '';
   $('#dash-stats').innerHTML = `
     <div class="card stat-card"><div class="num" style="color:var(--p600)">${fmtNum(st.total)}</div><div class="lbl">Cadastrados</div></div>
     <div class="card stat-card"><div class="num" style="color:var(--s600)">${fmtNum(st.found)}</div><div class="lbl">Produtos Existentes</div></div>
@@ -1113,9 +1187,9 @@ function renderDashboard() {
   `;
 
   const progressHTML = byFilial.length ? byFilial.map(f => `
-    <div style="margin-bottom:12px">
+    <div data-filial-progress="${f.filialId}" style="margin-bottom:12px;cursor:pointer">
       <div style="display:flex;justify-content:space-between;font-size:.85rem;margin-bottom:4px">
-        <span>${f.filialNome}</span><span>${fmtNum(f.totalFound)} / ${fmtNum(st.total)} (${f.pct}%)</span>
+        <span>${escapeHtml(f.filialNome)}</span><span>${fmtNum(f.totalFound)} / ${fmtNum(st.total)} (${f.pct}%)</span>
       </div>
       <div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden">
         <div style="height:100%;width:${f.pct}%;background:var(--s600);border-radius:4px;transition:width .5s"></div>
@@ -1144,7 +1218,7 @@ function renderDashboard() {
 
 /* ===== REPORTS ===== */
 const REPORT_DEFS = [
-  { id: 'encontrados', label: 'Encontrados', filter: p => S.session && S.session.encontrados[p.id] },
+  { id: 'encontrados', label: 'Encontrados', filter: p => { const s = currentViewSession(); return s && s.encontrados[p.id]; } },
   { id: 'sem-codigo', label: 'Sem Código', filter: p => !fmt(p.ean) },
   { id: 'duplicados', label: 'Duplicados', filter: () => false, precomputed: () => { const c = getGlobalClassifications(); return Object.keys(c.dups).map(id => S.productsMap[id]).filter(Boolean); } },
   { id: 'sem-fornecedor', label: 'Sem Fornecedor', filter: p => !p.fornecedor || p.fornecedor == 0 },
@@ -1197,8 +1271,8 @@ function loadReport() {
   else if (sort === 'desc_desc') data.sort((a, b) => fmt(b.descricao).localeCompare(fmt(a.descricao), 'pt-BR'));
   else if (sort === 'preco_asc') data.sort((a, b) => (S.pricesMap[a.id]?.precovenda || 0) - (S.pricesMap[b.id]?.precovenda || 0));
   else if (sort === 'preco_desc') data.sort((a, b) => (S.pricesMap[b.id]?.precovenda || 0) - (S.pricesMap[a.id]?.precovenda || 0));
-  else if (sort === 'estoque_asc') data.sort((a, b) => (S.stockMap['' + S.user.filialId + '_' + a.id] || 0) - (S.stockMap['' + S.user.filialId + '_' + b.id] || 0));
-  else if (sort === 'estoque_desc') data.sort((a, b) => (S.stockMap['' + S.user.filialId + '_' + b.id] || 0) - (S.stockMap['' + S.user.filialId + '_' + a.id] || 0));
+  else if (sort === 'estoque_asc') data.sort((a, b) => (S.stockMap['' + currentViewFilialId() + '_' + a.id] || 0) - (S.stockMap['' + currentViewFilialId() + '_' + b.id] || 0));
+  else if (sort === 'estoque_desc') data.sort((a, b) => (S.stockMap['' + currentViewFilialId() + '_' + b.id] || 0) - (S.stockMap['' + currentViewFilialId() + '_' + a.id] || 0));
   reportData = data;
   reportPage = 0;
   renderReportPage();
@@ -1212,8 +1286,9 @@ function renderReportPage() {
   const thead = `<tr>
     <th>SKU</th><th>Descrição</th><th>EAN</th><th>Categoria</th><th>Fornecedor</th><th>Tipo</th><th>Ativo</th><th>Encontrado</th>
   </tr>`;
+  const viewSession = currentViewSession();
   const tbody = page.map(p => {
-    const found = S.session && S.session.encontrados[p.id];
+    const found = viewSession && viewSession.encontrados[p.id];
     return `<tr onclick="showProductDetailsById(${p.id})" style="cursor:pointer">
       <td>${fmt(p.codproduto) || '-'}</td>
       <td>${fmt(p.descricao)}</td>
@@ -1253,9 +1328,10 @@ function showClassReport(className) {
 
 /* ===== EXPORT ===== */
 function exportCSV() {
+  const viewSession = currentViewSession();
   const headers = ['SKU', 'Descrição', 'EAN', 'Categoria', 'Fornecedor', 'Tipo', 'Ativo', 'Encontrado'];
   const rows = reportData.map(p => {
-    const found = S.session && S.session.encontrados[p.id] ? 'Sim' : 'Não';
+    const found = viewSession && viewSession.encontrados[p.id] ? 'Sim' : 'Não';
     return [
       fmt(p.codproduto),
       fmt(p.descricao).replace(/,/g, ' '),
@@ -1272,7 +1348,9 @@ function exportCSV() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'auditoria_' + (S.user.filialNome || 'export').replace(/\s/g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.csv';
+  const filial = S.isAdmin ? S.filiais.find(f => f.id === S.viewFilialId) : null;
+  const filialNome = S.isAdmin ? (filial ? (filial.fantasia || filial.razaosocial) : 'sem_loja') : S.user.filialNome;
+  a.download = 'auditoria_' + (filialNome || 'export').replace(/\s/g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.csv';
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -1287,8 +1365,28 @@ async function switchView(view) {
     await loadSessions(); // busca progresso atualizado de todos os usuários no servidor
     if (S.view === 'dashboard') renderDashboard();
   }
-  else if (view === 'audit') { $('#audit-view').style.display = 'block'; switchAuditPanel('bipagem'); setTimeout(() => $('#scan-input').focus(), 200); }
-  else if (view === 'reports') { $('#reports-view').style.display = 'block'; renderReports(); }
+  else if (view === 'audit') {
+    $('#audit-view').style.display = 'block';
+    if (S.isAdmin) {
+      // Admin so visualiza (sem bipar) - abre direto em Produtos Existentes,
+      // que e util pra ele; a aba Bipagem exige uma sessao propria que o
+      // admin nunca tem.
+      switchAuditPanel('existentes');
+      await loadSessions();
+      if (S.view === 'audit') { updateAuditUI(); renderCountList(); }
+    } else {
+      switchAuditPanel('bipagem');
+      setTimeout(() => $('#scan-input').focus(), 200);
+    }
+  }
+  else if (view === 'reports') {
+    $('#reports-view').style.display = 'block';
+    renderReports();
+    if (S.isAdmin) {
+      await loadSessions();
+      if (S.view === 'reports') renderReports();
+    }
+  }
   else if (view === 'debug') { $('#debug-view').style.display = 'block'; pullSyncedProducts(); }
   else if (view === 'bipadores') { $('#bipadores-view').style.display = 'block'; popAdminFilialSelect(); loadBipadoresList(); }
   else if (view === 'dedup') { $('#dedup-view').style.display = 'block'; popDedupFilialSelect(); }
@@ -1400,6 +1498,8 @@ async function handleAdminLogin() {
     $('#app').classList.add('active');
     $('#hdr-filial').textContent = 'Admin';
     $('#hdr-auditor').textContent = 'Administrador';
+    popAdminFilialSelect('#hdr-filial-select');
+    $('#hdr-filial-select').style.display = '';
     updateNavForRole();
     switchView('bipadores');
   } catch (e) {
@@ -1413,6 +1513,25 @@ function updateNavForRole() {
     const v = b.dataset.view;
     if (adminOnly.includes(v)) b.style.display = S.isAdmin ? '' : 'none';
   });
+}
+
+// Admin trocou a loja visualizada no seletor do cabecalho - busca sessoes
+// atualizadas do servidor e re-renderiza qualquer tela de leitura aberta.
+async function handleViewFilialChange(filialId) {
+  S.viewFilialId = filialId || null;
+  await loadSessions();
+  if (S.view === 'dashboard') renderDashboard();
+  else if (S.view === 'reports') renderReports();
+  else if (S.view === 'audit') { updateAuditUI(); renderCountList(); }
+}
+
+// Clique numa loja em "Progresso por Loja" (Dashboard) - atalho pra ver o
+// relatorio "Encontrados" daquela loja especifica, com export CSV.
+async function viewFilialReport(filialId) {
+  $('#hdr-filial-select').value = filialId;
+  S.viewFilialId = filialId;
+  currentReport = 'encontrados';
+  await switchView('reports');
 }
 
 function popAdminFilialSelect(selector = '#bip-filial') {
@@ -1690,11 +1809,13 @@ function handleLogout() {
   S.session = null;
   S.isAdmin = false;
   S.adminPassword = null;
+  S.viewFilialId = null;
   updateNavForRole();
   $('#app').classList.remove('active');
   $('#setup-modal').style.display = 'flex';
   $('#hdr-filial').textContent = '--';
   $('#hdr-auditor').textContent = '--';
+  $('#hdr-filial-select').style.display = 'none';
   lsSet(LS_KEYS.state, null);
   if (S.cameraStream) stopCamera();
   $('#admin-password').value = '';
@@ -1771,6 +1892,18 @@ async function init() {
 
   // Event: logout
   $('#btn-logout').addEventListener('click', () => { if (confirm('Sair da auditoria?')) handleLogout(); });
+
+  // Event: admin troca a loja visualizada (Dashboard/Relatorios/Auditoria)
+  $('#hdr-filial-select').addEventListener('change', (e) => {
+    handleViewFilialChange(e.target.value ? Number(e.target.value) : null);
+  });
+
+  // Event: clique numa loja em "Progresso por Loja" (delegado)
+  $('#progress-per-filial').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-filial-progress]');
+    if (!row) return;
+    viewFilialReport(Number(row.dataset.filialProgress));
+  });
 
   // Event: nav
   $$('nav button[data-view]').forEach(b => {
