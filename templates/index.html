@@ -1095,7 +1095,13 @@ function syncCountToServer(productId, ean, descricao, payload) {
 
 function renderCountList() {
   const session = currentViewSession();
-  if (!session) { $('#count-total').textContent = '0'; $('#count-list').innerHTML = ''; return; }
+  if (!session) {
+    $('#count-total').textContent = '0';
+    $('#count-list').innerHTML = S.isAdmin
+      ? '<div class="empty">Selecione uma loja no seletor do cabeçalho para ver o estoque contado.</div>'
+      : '';
+    return;
+  }
   // Somente o bipador dono da sessao pode editar contagem por aqui; admin
   // visualizando a sessao real de uma loja (currentViewSession() != S.session)
   // ve os mesmos dados, mas sem os controles de +1/-1/edicao manual.
@@ -1153,7 +1159,13 @@ function switchAuditPanel(panel) {
 /* ===== UI UPDATES ===== */
 function updateAuditUI() {
   const session = currentViewSession();
-  if (!session) { $('#found-count').textContent = '0'; $('#recent-scans-list').innerHTML = ''; return; }
+  if (!session) {
+    $('#found-count').textContent = '0';
+    $('#recent-scans-list').innerHTML = S.isAdmin
+      ? '<div class="empty">Selecione uma loja no seletor do cabeçalho para ver os produtos existentes.</div>'
+      : '';
+    return;
+  }
   const found = Object.keys(session.encontrados);
   $('#found-count').textContent = found.length;
   const list = $('#recent-scans-list');
@@ -1385,10 +1397,12 @@ async function switchView(view) {
       // Admin so visualiza (sem bipar) - abre direto em Produtos Existentes,
       // que e util pra ele; a aba Bipagem exige uma sessao propria que o
       // admin nunca tem.
+      $('#btn-mode-bipagem').style.display = 'none';
       switchAuditPanel('existentes');
       await loadSessions();
       if (S.view === 'audit') { updateAuditUI(); renderCountList(); }
     } else {
+      $('#btn-mode-bipagem').style.display = '';
       switchAuditPanel('bipagem');
       setTimeout(() => $('#scan-input').focus(), 200);
     }
