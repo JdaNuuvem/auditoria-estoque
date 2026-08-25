@@ -1513,37 +1513,34 @@ def sales_full_status():
     return jsonify({"ok": True, "state": VENDAS_FULL_STATE, "produtos_com_venda": total_produtos})
 
 
-DAILY_SYNC_STATE_FILE = os.path.join(DATA_DIR, "daily_sync_state.json")
-DAILY_SYNC_TZ = ZoneInfo("America/Sao_Paulo")
-DAILY_SYNC_HOUR = 23
-DAILY_SYNC_STATE = {"last_run_at": None, "last_covered_date": None, "last_error": None}
+# Dois workers independentes, cadencias diferentes (antes era um so as 23h
+# fazendo as duas coisas): vendas precisa ser frequente (pedidos novos o
+# tempo todo), catalogo de produtos muda pouco (cadastro novo e raro).
+VENDAS_SYNC_STATE_FILE = os.path.join(DATA_DIR, "daily_sync_state.json")  # nome de arquivo antigo, mesmo formato
+VENDAS_SYNC_TZ = ZoneInfo("America/Sao_Paulo")
+VENDAS_SYNC_INTERVAL_MINUTES = 10
+VENDAS_SYNC_STATE = {"last_run_at": None, "last_covered_date": None, "last_error": None}
+
+PRODUTOS_SYNC_INTERVAL_HOURS = 24
+PRODUTOS_SYNC_STATE = {"last_run_at": None, "last_error": None}
 
 
-def _run_daily_sync():
-    """Job diario (23:00 America/Sao_Paulo, ver _daily_scheduler_loop): puxa
-    produtos novos cadastrados (refresh_cache - resync completo do catalogo,
-    ja existente e usado manualmente via /api/cache/reload) e faz o backfill
-    incremental de vendas ate hoje, retomando de onde o ultimo dia coberto
-    parou (se o servidor ficou fora por alguns dias, cobre tudo de uma vez).
-
-    So avanca 'last_covered_date' se _run_vendas_full terminou sem erro -
-    numa falha (API fora, rate limit persistente), a mesma janela e
-    reprocessada no proximo disparo em vez de ser silenciosamente perdida."""
-    print("[daily-sync] iniciando sincronizacao diaria (produtos + vendas)...")
-    DAILY_SYNC_STATE["last_run_at"] = datetime.now().isoformat()
-    DAILY_SYNC_STATE["last_error"] = None
-
-    if not CACHE["loading"]:
-        threading.Thread(target=refresh_cache, daemon=True).start()
-    else:
-        print("[daily-sync] refresh de catalogo ja em andamento, nao disparei outro.")
+def _run_vendas_sync_job():
+    """Job de vendas (a cada VENDAS_SYNC_INTERVAL_MINUTES minutos): backfill
+    incremental, retomando de onde o ultimo dia coberto parou (se o servidor
+    ficou fora por um tempo, cobre tudo de uma vez no proximo disparo). Como
+    _run_vendas_full sempre relista o dia atual e so detalha pedidos ainda
+    nao vistos, rodar a cada poucos minutos e barato quando nao ha pedido
+    novo - so avanca 'ultima_data_coberta' se terminou sem erro."""
+    VENDAS_SYNC_STATE["last_run_at"] = datetime.now().isoformat()
+    VENDAS_SYNC_STATE["last_error"] = None
 
     with _vendas_full_lock:
         if VENDAS_FULL_STATE["running"]:
-            print("[daily-sync] backfill de vendas ja rodando (outra chamada) - pulando, sera coberto no proximo disparo.")
+            print("[vendas-sync] backfill ja rodando (outra chamada) - pulando, tenta no proximo ciclo.")
             return
         hoje = date.today()
-        estado = _load_json_file(DAILY_SYNC_STATE_FILE, {})
+        estado = _load_json_file(VENDAS_SYNC_STATE_FILE, {})
         ultima_coberta = estado.get("ultima_data_coberta")
         if ultima_coberta:
             data_de = (date.fromisoformat(ultima_coberta) + timedelta(days=1)).isoformat()
@@ -1556,44 +1553,66 @@ def _run_daily_sync():
         def _worker():
             _run_vendas_full(data_de, data_ate)
             if VENDAS_FULL_STATE.get("last_error"):
-                DAILY_SYNC_STATE["last_error"] = VENDAS_FULL_STATE["last_error"]
-                print(f"[daily-sync] backfill de vendas falhou: {VENDAS_FULL_STATE['last_error']} - tenta de novo no proximo disparo.")
+                VENDAS_SYNC_STATE["last_error"] = VENDAS_FULL_STATE["last_error"]
+                print(f"[vendas-sync] falhou: {VENDAS_FULL_STATE['last_error']} - tenta de novo no proximo ciclo.")
             else:
-                _save_json_file(DAILY_SYNC_STATE_FILE, {"ultima_data_coberta": data_ate})
-                DAILY_SYNC_STATE["last_covered_date"] = data_ate
-                print(f"[daily-sync] vendas atualizadas ate {data_ate}.")
+                _save_json_file(VENDAS_SYNC_STATE_FILE, {"ultima_data_coberta": data_ate})
+                VENDAS_SYNC_STATE["last_covered_date"] = data_ate
+                print(f"[vendas-sync] vendas atualizadas ate {data_ate}.")
 
         threading.Thread(target=_worker, daemon=True).start()
 
 
-def _daily_scheduler_loop():
-    """Dorme at o proximo 23:00 (America/Sao_Paulo) e dispara _run_daily_sync,
-    em loop indefinido. Usa zoneinfo em vez do horario local do container
-    (que normalmente roda em UTC no Docker) pra nao depender de TZ configurada
-    na infra."""
+def _vendas_scheduler_loop():
+    """Dispara _run_vendas_sync_job a cada VENDAS_SYNC_INTERVAL_MINUTES
+    minutos, indefinidamente."""
     while True:
-        now = datetime.now(DAILY_SYNC_TZ)
-        target = now.replace(hour=DAILY_SYNC_HOUR, minute=0, second=0, microsecond=0)
-        if target <= now:
-            target += timedelta(days=1)
-        time.sleep((target - now).total_seconds())
+        time.sleep(VENDAS_SYNC_INTERVAL_MINUTES * 60)
         try:
-            _run_daily_sync()
+            _run_vendas_sync_job()
         except Exception as exc:
-            DAILY_SYNC_STATE["last_error"] = str(exc)
-            print(f"[daily-sync] erro ao disparar job diario: {exc}")
+            VENDAS_SYNC_STATE["last_error"] = str(exc)
+            print(f"[vendas-sync] erro ao disparar: {exc}")
 
 
-@app.route("/api/daily-sync/status")
-def daily_sync_status():
-    now = datetime.now(DAILY_SYNC_TZ)
-    next_run = now.replace(hour=DAILY_SYNC_HOUR, minute=0, second=0, microsecond=0)
-    if next_run <= now:
-        next_run += timedelta(days=1)
-    estado = _load_json_file(DAILY_SYNC_STATE_FILE, {})
-    return jsonify({"ok": True, "state": DAILY_SYNC_STATE,
+def _run_produtos_sync_job():
+    """Job de catalogo (a cada PRODUTOS_SYNC_INTERVAL_HOURS horas): resync
+    completo (filiais/produtos/estoques/precos) pra pegar produtos novos
+    cadastrados - mesma rotina do botao manual /api/cache/reload."""
+    PRODUTOS_SYNC_STATE["last_run_at"] = datetime.now().isoformat()
+    PRODUTOS_SYNC_STATE["last_error"] = None
+    if CACHE["loading"]:
+        print("[produtos-sync] refresh ja em andamento, nao disparei outro.")
+        return
+    refresh_cache()
+    PRODUTOS_SYNC_STATE["last_error"] = CACHE.get("last_error")
+
+
+def _produtos_scheduler_loop():
+    """Dispara _run_produtos_sync_job a cada PRODUTOS_SYNC_INTERVAL_HOURS
+    horas, indefinidamente."""
+    while True:
+        time.sleep(PRODUTOS_SYNC_INTERVAL_HOURS * 3600)
+        try:
+            _run_produtos_sync_job()
+        except Exception as exc:
+            PRODUTOS_SYNC_STATE["last_error"] = str(exc)
+            print(f"[produtos-sync] erro ao disparar: {exc}")
+
+
+@app.route("/api/vendas-sync/status")
+def vendas_sync_status():
+    estado = _load_json_file(VENDAS_SYNC_STATE_FILE, {})
+    return jsonify({"ok": True, "state": VENDAS_SYNC_STATE,
                     "ultima_data_coberta": estado.get("ultima_data_coberta"),
-                    "proximo_disparo": next_run.isoformat()})
+                    "intervalo_minutos": VENDAS_SYNC_INTERVAL_MINUTES})
+
+
+@app.route("/api/produtos-sync/status")
+def produtos_sync_status():
+    return jsonify({"ok": True, "state": PRODUTOS_SYNC_STATE,
+                     "intervalo_horas": PRODUTOS_SYNC_INTERVAL_HOURS,
+                     "catalogo_sincronizado_em": CACHE.get("synced_at")})
 
 
 # ===== API EXTERNA (machine-to-machine, outro app usando este como fonte
@@ -1793,5 +1812,6 @@ if __name__ == "__main__":
         _save_cache_to_disk()
     else:
         threading.Thread(target=refresh_cache, daemon=True).start()
-    threading.Thread(target=_daily_scheduler_loop, daemon=True).start()
+    threading.Thread(target=_vendas_scheduler_loop, daemon=True).start()
+    threading.Thread(target=_produtos_scheduler_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False)
