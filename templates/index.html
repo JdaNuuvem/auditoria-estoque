@@ -1632,11 +1632,12 @@ function renderReportPage() {
   const filialEmFoco = currentViewFilialId();
   const escopoVendas = filialEmFoco != null ? ' (loja)' : ' (todas as lojas)';
   const thead = `<tr>
-    <th>SKU</th>${sortTh('descricao', 'Descrição')}<th>EAN</th><th>Categoria</th><th>Fornecedor</th><th>Tipo</th><th>Ativo</th><th>Encontrado</th>${sortTh('qtdVendida', 'Qtd Vendida' + escopoVendas)}${sortTh('valorVendido', 'Valor Vendido' + escopoVendas)}${sortTh('ultimaVenda', 'Última Venda' + escopoVendas)}
+    <th>SKU</th>${sortTh('descricao', 'Descrição')}<th>EAN</th><th>Categoria</th><th>Fornecedor</th><th>Tipo</th><th>Ativo</th><th>Encontrado</th><th>Qtd em Estoque (Contagem)</th>${sortTh('qtdVendida', 'Qtd Vendida' + escopoVendas)}${sortTh('valorVendido', 'Valor Vendido' + escopoVendas)}${sortTh('ultimaVenda', 'Última Venda' + escopoVendas)}
   </tr>`;
   const viewSession = currentViewSession();
   const tbody = page.map(p => {
-    const found = viewSession && viewSession.encontrados[p.id];
+    const entry = viewSession ? viewSession.encontrados[p.id] : null;
+    const found = !!entry;
     const sales = salesForCurrentView(p.id);
     return `<tr onclick="showProductDetailsById(${p.id})" style="cursor:pointer">
       <td>${fmt(p.codproduto) || '-'}</td>
@@ -1647,6 +1648,7 @@ function renderReportPage() {
       <td>${fmt(p.tipo)}</td>
       <td>${p.ativo === '0' ? '<span class="badge bg-nao-encontrado">Não</span>' : '<span class="badge bg-encontrado">Sim</span>'}</td>
       <td>${found ? '<span class="badge bg-encontrado">Sim</span>' : '<span class="badge bg-pendente">Não</span>'}</td>
+      <td>${entry && entry.qtd != null ? fmtNum(entry.qtd) : '-'}</td>
       <td>${sales ? fmtNum(sales.total_qty) : '-'}</td>
       <td>${sales ? fmtMoney(sales.total_value) : '-'}</td>
       <td style="font-size:.75rem">${sales && sales.last_sale_date ? new Date(sales.last_sale_date + 'T00:00:00').toLocaleDateString('pt-BR') : (sales ? 'Sem venda' : '-')}</td>
@@ -1695,11 +1697,11 @@ function exportCSV() {
   const escopoVendas = filialId != null ? ' (loja)' : ' (todas as lojas)';
   const headers = [
     'SKU', 'Descrição', 'EAN', 'Referência', 'Categoria', 'Marca', 'Fornecedor', 'Tipo', 'NCM',
-    'Unidade', 'Peso', 'Origem', 'Ativo', 'Encontrado',
+    'Unidade', 'Peso', 'Origem', 'Ativo', 'Encontrado', 'Qtd em Estoque (Contagem)',
     'Preço Venda', 'Preço Custo', 'Estoque Sistema (loja)',
     'Qtd Vendida' + escopoVendas, 'Valor Vendido' + escopoVendas, 'Data Última Venda' + escopoVendas, 'Nº de Vendas' + escopoVendas,
   ];
-  if (isEncontrados) headers.push('Horário 1º Bipe', 'Qtd Contada', 'Diferença');
+  if (isEncontrados) headers.push('Horário 1º Bipe', 'Diferença (Contagem vs Sistema)');
   // reportData já está na ordem escolhida (dropdown "Ordenar por" ou clique
   // no cabeçalho da coluna, os dois alimentam o mesmo reportSort em
   // loadReport) - exportar respeita exatamente o que está na tela.
@@ -1724,6 +1726,7 @@ function exportCSV() {
       fmt(p.origem),
       p.ativo === '0' ? 'Não' : 'Sim',
       found,
+      entry && entry.qtd != null ? entry.qtd : '',
       preco ? fmtNumeroBR(preco.precovenda) : '',
       preco ? fmtNumeroBR(preco.precocusto) : '',
       estoqueSistema,
@@ -1736,7 +1739,6 @@ function exportCSV() {
       const qtd = entry && entry.qtd != null ? entry.qtd : null;
       row.push(
         entry ? entry.scannedAt : '',
-        qtd != null ? qtd : '',
         qtd != null ? qtd - (estoqueSistema || 0) : '',
       );
     }
