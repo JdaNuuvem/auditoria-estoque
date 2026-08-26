@@ -710,6 +710,22 @@ function currentViewFilialId() {
   return S.isAdmin ? S.viewFilialId : S.user.filialId;
 }
 
+const SALES_VAZIO = { total_sales: 0, total_qty: 0, total_value: 0, last_sale_date: null, first_sale_date: null, days_without_sale: null };
+
+// Estatisticas de venda de um produto, escopadas pra loja atualmente em
+// foco (seletor de loja do admin, ou a propria loja do bipador). Se nao
+// houver loja em foco (admin sem selecionar nenhuma), cai no total geral
+// (todas as lojas somadas) - mesmo comportamento de antes da separacao
+// por loja. sales_cache.por_filial e populado pelo backfill no servidor.
+function salesForCurrentView(id) {
+  const s = S.salesCache[id];
+  if (!s) return null;
+  const filialId = currentViewFilialId();
+  if (filialId == null) return s;
+  if (!s.por_filial) return s;
+  return s.por_filial[filialId] || SALES_VAZIO;
+}
+
 function getGlobalClassifications() {
   const noEan = [];
   const dups = {};
@@ -946,13 +962,17 @@ function showProductDetails(p) {
 async function loadSalesStats(productId) {
   const el = $('#sales-info-' + productId);
   el.innerHTML = '<span style="color:var(--muted)">Carregando...</span>';
+  const filialId = currentViewFilialId();
+  const escopoLabel = filialId != null ? 'nesta loja' : 'todas as lojas';
   try {
-    const resp = await fetch('/api/sales/' + productId);
+    const url = '/api/sales/' + productId + (filialId != null ? '?filialId=' + filialId : '');
+    const resp = await fetch(url);
     const data = await resp.json();
     if (!data.ok) throw new Error(data.error);
     const s = data.stats;
     const lastDate = s.last_sale_date ? new Date(s.last_sale_date + 'T00:00:00').toLocaleDateString('pt-BR') : '-';
     el.innerHTML = `
+      <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Vendas — ${escopoLabel}</div>
       <div class="prod-field"><span class="fld">Total Vendido</span><span class="val">${fmtNum(s.total_qty)} un</span></div>
       <div class="prod-field"><span class="fld">Vendas</span><span class="val">${fmtNum(s.total_sales)} pedidos</span></div>
       <div class="prod-field"><span class="fld">Faturamento</span><span class="val">${fmtMoney(s.total_value)}</span></div>
@@ -1410,7 +1430,7 @@ function updateAuditUI() {
 // buscado no servidor (mostra "-" em vez de travar a tela numa chamada
 // individual por produto, que seria lenta - rate limit de 3s na API).
 function fmtLastSale(id) {
-  const s = S.salesCache[id];
+  const s = salesForCurrentView(id);
   if (!s || !s.last_sale_date) return s ? 'Sem venda registrada' : '-';
   const d = new Date(s.last_sale_date + 'T00:00:00').toLocaleDateString('pt-BR');
   const dias = s.days_without_sale != null ? ` (${s.days_without_sale}d)` : '';
@@ -1495,21 +1515,21 @@ const REPORT_SORT_COLS = {
     asc: (a, b) => fmt(a.descricao).localeCompare(fmt(b.descricao), 'pt-BR'),
   },
   qtdVendida: {
-    asc: (a, b) => (S.salesCache[a.id]?.total_qty || 0) - (S.salesCache[b.id]?.total_qty || 0),
+    asc: (a, b) => (salesForCurrentView(a.id)?.total_qty || 0) - (salesForCurrentView(b.id)?.total_qty || 0),
   },
   valorVendido: {
-    asc: (a, b) => (S.salesCache[a.id]?.total_value || 0) - (S.salesCache[b.id]?.total_value || 0),
+    asc: (a, b) => (salesForCurrentView(a.id)?.total_value || 0) - (salesForCurrentView(b.id)?.total_value || 0),
   },
   ultimaVenda: {
     asc: (a, b) => {
-      const da = S.salesCache[a.id]?.last_sale_date, db = S.salesCache[b.id]?.last_sale_date;
+      const da = salesForCurrentView(a.id)?.last_sale_date, db = salesForCurrentView(b.id)?.last_sale_date;
       if (!da && !db) return 0;
       if (!da) return 1;
       if (!db) return -1;
       return da.localeCompare(db);
     },
     desc: (a, b) => {
-      const da = S.salesCache[a.id]?.last_sale_date, db = S.salesCache[b.id]?.last_sale_date;
+      const da = salesForCurrentView(a.id)?.last_sale_date, db = salesForCurrentView(b.id)?.last_sale_date;
       if (!da && !db) return 0;
       if (!da) return 1;
       if (!db) return -1;
@@ -1594,13 +1614,18 @@ function renderReportPage() {
     const arrow = active ? `<span class="arrow">${reportSort.dir === 'asc' ? '▲' : '▼'}</span>` : '';
     return `<th class="sortable" onclick="setReportSort('${col}')">${label}${arrow}</th>`;
   };
+  // As 3 colunas de venda mudam de escopo conforme a loja em foco no
+  // seletor do cabeçalho - deixa isso explícito no próprio título da
+  // coluna pra não repetir a confusão de "é geral ou por loja?".
+  const filialEmFoco = currentViewFilialId();
+  const escopoVendas = filialEmFoco != null ? ' (loja)' : ' (todas as lojas)';
   const thead = `<tr>
-    <th>SKU</th>${sortTh('descricao', 'Descrição')}<th>EAN</th><th>Categoria</th><th>Fornecedor</th><th>Tipo</th><th>Ativo</th><th>Encontrado</th>${sortTh('qtdVendida', 'Qtd Vendida')}${sortTh('valorVendido', 'Valor Vendido')}${sortTh('ultimaVenda', 'Última Venda')}
+    <th>SKU</th>${sortTh('descricao', 'Descrição')}<th>EAN</th><th>Categoria</th><th>Fornecedor</th><th>Tipo</th><th>Ativo</th><th>Encontrado</th>${sortTh('qtdVendida', 'Qtd Vendida' + escopoVendas)}${sortTh('valorVendido', 'Valor Vendido' + escopoVendas)}${sortTh('ultimaVenda', 'Última Venda' + escopoVendas)}
   </tr>`;
   const viewSession = currentViewSession();
   const tbody = page.map(p => {
     const found = viewSession && viewSession.encontrados[p.id];
-    const sales = S.salesCache[p.id];
+    const sales = salesForCurrentView(p.id);
     return `<tr onclick="showProductDetailsById(${p.id})" style="cursor:pointer">
       <td>${fmt(p.codproduto) || '-'}</td>
       <td>${fmt(p.descricao)}</td>
@@ -1655,11 +1680,12 @@ function exportCSV() {
   const viewSession = currentViewSession();
   const isEncontrados = currentReport === 'encontrados' && viewSession;
   const filialId = currentViewFilialId();
+  const escopoVendas = filialId != null ? ' (loja)' : ' (todas as lojas)';
   const headers = [
     'SKU', 'Descrição', 'EAN', 'Referência', 'Categoria', 'Marca', 'Fornecedor', 'Tipo', 'NCM',
     'Unidade', 'Peso', 'Origem', 'Ativo', 'Encontrado',
     'Preço Venda', 'Preço Custo', 'Estoque Sistema (loja)',
-    'Qtd Vendida', 'Valor Vendido', 'Data Última Venda', 'Nº de Vendas',
+    'Qtd Vendida' + escopoVendas, 'Valor Vendido' + escopoVendas, 'Data Última Venda' + escopoVendas, 'Nº de Vendas' + escopoVendas,
   ];
   if (isEncontrados) headers.push('Horário 1º Bipe', 'Qtd Contada', 'Diferença');
   // reportData já está na ordem escolhida (dropdown "Ordenar por" ou clique
@@ -1668,7 +1694,7 @@ function exportCSV() {
   const rows = reportData.map(p => {
     const entry = viewSession ? viewSession.encontrados[p.id] : null;
     const found = entry ? 'Sim' : 'Não';
-    const sales = S.salesCache[p.id];
+    const sales = salesForCurrentView(p.id);
     const preco = S.pricesMap[p.id];
     const estoqueSistema = filialId ? (S.stockMap[filialId + '_' + p.id] || 0) : '';
     const row = [

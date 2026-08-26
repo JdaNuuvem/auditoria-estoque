@@ -1007,26 +1007,45 @@ def _fetch_sales_stats(idproduto):
     return stats
 
 
-def _com_dias_sem_vender(stats):
+def _recalcula_dias_sem_vender(obj):
     """days_without_sale persistido fica velho com o tempo (calculado no dia
     em que a linha foi escrita) - recalcula sempre a partir de last_sale_date
-    e da data de hoje, sem tocar no arquivo em disco."""
-    last_sale_date = stats.get("last_sale_date")
+    e da data de hoje, sem tocar no arquivo em disco. Usado tanto no nivel
+    geral quanto em cada entrada de por_filial."""
+    last_sale_date = obj.get("last_sale_date")
     if not last_sale_date:
-        return stats
+        return obj
     try:
         last_dt = datetime.strptime(last_sale_date, "%Y-%m-%d").date()
     except ValueError:
-        return stats
-    return {**stats, "days_without_sale": (date.today() - last_dt).days}
+        return obj
+    return {**obj, "days_without_sale": (date.today() - last_dt).days}
+
+
+def _com_dias_sem_vender(stats):
+    """Recalcula days_without_sale no nivel geral E em cada loja de
+    por_filial - sem isso, olhar uma loja especifica mostraria o
+    'dias sem vender' calculado pro total geral, nao daquela loja."""
+    out = _recalcula_dias_sem_vender(stats)
+    por_filial = out.get("por_filial")
+    if por_filial:
+        out = {**out, "por_filial": {fid: _recalcula_dias_sem_vender(f) for fid, f in por_filial.items()}}
+    return out
 
 
 @app.route("/api/sales/<int:idproduto>")
 def product_sales(idproduto):
+    filial_id = request.args.get("filialId")
     cache = _load_sales_cache()
     cached = cache.get(str(idproduto))
     if cached:
-        return jsonify({"ok": True, "stats": _com_dias_sem_vender(cached), "cached": True})
+        stats = _com_dias_sem_vender(cached)
+        if filial_id and stats.get("por_filial"):
+            stats = stats["por_filial"].get(filial_id) or {
+                "total_sales": 0, "total_qty": 0, "total_value": 0,
+                "last_sale_date": None, "first_sale_date": None, "days_without_sale": None,
+            }
+        return jsonify({"ok": True, "stats": stats, "cached": True})
 
     stats = _fetch_sales_stats(idproduto)
     with _sales_cache_lock:
@@ -1322,6 +1341,8 @@ def sales_2026_full_status():
     return jsonify({"ok": True, "state": VENDAS_2026_FULL_STATE, "produtos_com_venda_2026": total_produtos})
 
 
+SALES_CACHE_SCHEMA_VERSION = 2  # v2 = adiciona por_filial (qtd/valor/data por loja)
+SALES_CACHE_VERSION_FILE = os.path.join(DATA_DIR, "sales_cache_version.json")
 VENDAS_FULL_META_FILE = os.path.join(DATA_DIR, "vendas_full_pedidos_meta.json")
 VENDAS_FULL_LISTAGEM_PROGRESSO_FILE = os.path.join(DATA_DIR, "vendas_full_listagem_progresso.json")
 VENDAS_FULL_PROCESSADOS_FILE = os.path.join(DATA_DIR, "vendas_full_processados.json")
@@ -1430,8 +1451,20 @@ def _run_vendas_full(data_de, data_ate):
         _save_json_file(VENDAS_FULL_LISTAGEM_PROGRESSO_FILE, {})
 
         VENDAS_FULL_STATE["phase"] = "detalhando_pedidos"
-        processados = set(_load_json_file(VENDAS_FULL_PROCESSADOS_FILE, []))
-        cache = {} if primeira_execucao else _load_sales_cache()
+        # Migracao de schema: versao 1 nao guardava valor/data por loja (so
+        # uma quantidade agregada solta, sales_by_filial, nunca usada em
+        # nenhuma tela). Versao 2 guarda por_filial completo (qtd, valor,
+        # ultima venda) por produto. Ao detectar a versao antiga, reseta
+        # cache E processados (mas reaproveita o meta.json ja existente,
+        # que tem todos os ids+data+filial - pula a parte lenta, a
+        # listagem, e reprocessa so o detalhamento com a logica nova).
+        versao_salva = _load_json_file(SALES_CACHE_VERSION_FILE, {}).get("versao")
+        migracao_schema = versao_salva != SALES_CACHE_SCHEMA_VERSION
+        if migracao_schema:
+            print(f"[vendas-full] schema de sales_cache desatualizado (salvo={versao_salva}, atual={SALES_CACHE_SCHEMA_VERSION}) - reprocessando tudo com separacao por loja.")
+            _save_json_file(SALES_CACHE_VERSION_FILE, {"versao": SALES_CACHE_SCHEMA_VERSION})
+        processados = set() if migracao_schema else set(_load_json_file(VENDAS_FULL_PROCESSADOS_FILE, []))
+        cache = {} if (primeira_execucao or migracao_schema) else _load_sales_cache()
         ids = list(meta.keys())
         pendentes = [i for i in ids if i not in processados]
         VENDAS_FULL_STATE["total"] = len(ids)
@@ -1454,10 +1487,12 @@ def _run_vendas_full(data_de, data_ate):
                     entry = cache.setdefault(pid, {
                         "idproduto": int(pid), "total_sales": 0, "total_qty": 0, "total_value": 0.0,
                         "last_sale_date": None, "first_sale_date": None, "days_without_sale": None,
-                        "sales_by_filial": {},
+                        "por_filial": {},
                     })
                     qtd = item.get("qtd") or 0
                     valor = item.get("valorvenda") or 0
+
+                    # Geral (todas as lojas somadas)
                     entry["total_qty"] += qtd
                     entry["total_value"] += valor * qtd
                     entry["total_sales"] += 1
@@ -1466,9 +1501,22 @@ def _run_vendas_full(data_de, data_ate):
                             entry["last_sale_date"] = pedido_data
                         if not entry["first_sale_date"] or pedido_data < entry["first_sale_date"]:
                             entry["first_sale_date"] = pedido_data
+
+                    # Por loja - mesmos campos do geral, so que isolados por filial_venda
                     if pedido_filial is not None:
                         fkey = str(pedido_filial)
-                        entry["sales_by_filial"][fkey] = entry["sales_by_filial"].get(fkey, 0) + qtd
+                        f_entry = entry["por_filial"].setdefault(fkey, {
+                            "total_sales": 0, "total_qty": 0, "total_value": 0.0,
+                            "last_sale_date": None, "first_sale_date": None, "days_without_sale": None,
+                        })
+                        f_entry["total_qty"] += qtd
+                        f_entry["total_value"] += valor * qtd
+                        f_entry["total_sales"] += 1
+                        if pedido_data:
+                            if not f_entry["last_sale_date"] or pedido_data > f_entry["last_sale_date"]:
+                                f_entry["last_sale_date"] = pedido_data
+                            if not f_entry["first_sale_date"] or pedido_data < f_entry["first_sale_date"]:
+                                f_entry["first_sale_date"] = pedido_data
 
                 processados.add(idpedido)
                 VENDAS_FULL_STATE["processed"] = len(processados)
