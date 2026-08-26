@@ -194,7 +194,11 @@ def refresh_cache():
         CACHE["progress"]["filiais"] = len(filiais)
         print(f"[cache] {len(filiais)} filiais")
         print("[cache] Baixando produtos...")
-        produtos = _paginated_fetch("produtos", filter_fn=lambda p: p.get("ean") and str(p["ean"]).strip())
+        # Sem filtro de EAN: produtos sem codigo de barras (ex: alguns itens
+        # so tem codigo interno/codproduto, como um lapis sem EAN
+        # cadastrado) precisam continuar no catalogo pra a bipagem por
+        # codigo interno (findByEanOuCodigo no frontend) conseguir achar.
+        produtos = _paginated_fetch("produtos")
         CACHE["progress"]["produtos"] = len(produtos)
         print(f"[cache] {len(produtos)} produtos")
         print("[cache] Baixando estoques...")
