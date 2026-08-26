@@ -1575,21 +1575,28 @@ def sales_full_status():
 # fazendo as duas coisas): vendas precisa ser frequente (pedidos novos o
 # tempo todo), catalogo de produtos muda pouco (cadastro novo e raro).
 VENDAS_SYNC_STATE_FILE = os.path.join(DATA_DIR, "daily_sync_state.json")  # nome de arquivo antigo, mesmo formato
-VENDAS_SYNC_TZ = ZoneInfo("America/Sao_Paulo")
-VENDAS_SYNC_INTERVAL_MINUTES = 10
+SYNC_TZ = ZoneInfo("America/Sao_Paulo")
+VENDAS_SYNC_HORAS = [12, 22]  # dispara 12:00 e 22:00 (America/Sao_Paulo)
 VENDAS_SYNC_STATE = {"last_run_at": None, "last_covered_date": None, "last_error": None}
 
-PRODUTOS_SYNC_INTERVAL_HOURS = 24
+PRODUTOS_SYNC_HORA = 23  # dispara 23:00 (America/Sao_Paulo)
 PRODUTOS_SYNC_STATE = {"last_run_at": None, "last_error": None}
 
 
+def _proximo_horario_fixo(horas):
+    """Proximo horario (America/Sao_Paulo) dentre a lista `horas` (0-23) que
+    ainda nao passou hoje - senao, o primeiro horario da lista amanha."""
+    now = datetime.now(SYNC_TZ)
+    candidatos = sorted(now.replace(hour=h, minute=0, second=0, microsecond=0) for h in horas)
+    futuros = [c for c in candidatos if c > now]
+    return futuros[0] if futuros else candidatos[0] + timedelta(days=1)
+
+
 def _run_vendas_sync_job():
-    """Job de vendas (a cada VENDAS_SYNC_INTERVAL_MINUTES minutos): backfill
-    incremental, retomando de onde o ultimo dia coberto parou (se o servidor
-    ficou fora por um tempo, cobre tudo de uma vez no proximo disparo). Como
-    _run_vendas_full sempre relista o dia atual e so detalha pedidos ainda
-    nao vistos, rodar a cada poucos minutos e barato quando nao ha pedido
-    novo - so avanca 'ultima_data_coberta' se terminou sem erro."""
+    """Job de vendas (12:00 e 22:00 America/Sao_Paulo, ver _vendas_scheduler_loop):
+    backfill incremental, retomando de onde o ultimo dia coberto parou (se o
+    servidor ficou fora por um tempo, cobre tudo de uma vez no proximo
+    disparo) - so avanca 'ultima_data_coberta' se terminou sem erro."""
     VENDAS_SYNC_STATE["last_run_at"] = datetime.now().isoformat()
     VENDAS_SYNC_STATE["last_error"] = None
 
@@ -1622,10 +1629,11 @@ def _run_vendas_sync_job():
 
 
 def _vendas_scheduler_loop():
-    """Dispara _run_vendas_sync_job a cada VENDAS_SYNC_INTERVAL_MINUTES
-    minutos, indefinidamente."""
+    """Dorme ate o proximo horario em VENDAS_SYNC_HORAS (America/Sao_Paulo)
+    e dispara _run_vendas_sync_job, indefinidamente."""
     while True:
-        time.sleep(VENDAS_SYNC_INTERVAL_MINUTES * 60)
+        target = _proximo_horario_fixo(VENDAS_SYNC_HORAS)
+        time.sleep((target - datetime.now(SYNC_TZ)).total_seconds())
         try:
             _run_vendas_sync_job()
         except Exception as exc:
@@ -1634,9 +1642,9 @@ def _vendas_scheduler_loop():
 
 
 def _run_produtos_sync_job():
-    """Job de catalogo (a cada PRODUTOS_SYNC_INTERVAL_HOURS horas): resync
-    completo (filiais/produtos/estoques/precos) pra pegar produtos novos
-    cadastrados - mesma rotina do botao manual /api/cache/reload."""
+    """Job de catalogo (23:00 America/Sao_Paulo, ver _produtos_scheduler_loop):
+    resync completo (filiais/produtos/estoques/precos) pra pegar produtos
+    novos cadastrados - mesma rotina do botao manual /api/cache/reload."""
     PRODUTOS_SYNC_STATE["last_run_at"] = datetime.now().isoformat()
     PRODUTOS_SYNC_STATE["last_error"] = None
     if CACHE["loading"]:
@@ -1647,10 +1655,11 @@ def _run_produtos_sync_job():
 
 
 def _produtos_scheduler_loop():
-    """Dispara _run_produtos_sync_job a cada PRODUTOS_SYNC_INTERVAL_HOURS
-    horas, indefinidamente."""
+    """Dorme ate o proximo PRODUTOS_SYNC_HORA (America/Sao_Paulo) e dispara
+    _run_produtos_sync_job, indefinidamente."""
     while True:
-        time.sleep(PRODUTOS_SYNC_INTERVAL_HOURS * 3600)
+        target = _proximo_horario_fixo([PRODUTOS_SYNC_HORA])
+        time.sleep((target - datetime.now(SYNC_TZ)).total_seconds())
         try:
             _run_produtos_sync_job()
         except Exception as exc:
@@ -1661,15 +1670,19 @@ def _produtos_scheduler_loop():
 @app.route("/api/vendas-sync/status")
 def vendas_sync_status():
     estado = _load_json_file(VENDAS_SYNC_STATE_FILE, {})
+    proximo = _proximo_horario_fixo(VENDAS_SYNC_HORAS)
     return jsonify({"ok": True, "state": VENDAS_SYNC_STATE,
                     "ultima_data_coberta": estado.get("ultima_data_coberta"),
-                    "intervalo_minutos": VENDAS_SYNC_INTERVAL_MINUTES})
+                    "horarios": VENDAS_SYNC_HORAS,
+                    "proximo_disparo": proximo.isoformat()})
 
 
 @app.route("/api/produtos-sync/status")
 def produtos_sync_status():
+    proximo = _proximo_horario_fixo([PRODUTOS_SYNC_HORA])
     return jsonify({"ok": True, "state": PRODUTOS_SYNC_STATE,
-                     "intervalo_horas": PRODUTOS_SYNC_INTERVAL_HOURS,
+                     "horario": PRODUTOS_SYNC_HORA,
+                     "proximo_disparo": proximo.isoformat(),
                      "catalogo_sincronizado_em": CACHE.get("synced_at")})
 
 
