@@ -668,6 +668,18 @@ function findByEan(ean) {
   return null;
 }
 
+// Bipagem rapida: tenta EAN primeiro, se nao achar tenta codigo interno do
+// produto (codproduto) - alguns produtos (ex: 034431, um lapis) nao tem
+// codigo de barras EAN cadastrado, so o codigo interno. Nao cai pra NCM
+// (isso e so na busca manual via resolveProduct) porque NCM pode casar
+// varios produtos, e bipagem precisa de um match unico e imediato.
+function findByEanOuCodigo(code) {
+  const byEan = findByEan(code);
+  if (byEan && byEan.length) return byEan;
+  const c = fmt(code);
+  return S.productsByCodigo[c] || null;
+}
+
 function findByText(q) {
   const ql = q.toLowerCase().trim();
   if (!ql) return [];
@@ -1024,7 +1036,7 @@ function printLabel(productId) {
 // codigo bipado fisicamente deve ser resolvido.
 function dispatchScan(barcode) {
   if (!barcode) return;
-  const matches = findByEan(barcode);
+  const matches = findByEanOuCodigo(barcode);
   if (!matches || matches.length === 0) {
     showScanFeedback('❌ CÓDIGO NÃO ENCONTRADO NO CATÁLOGO', 'err');
     return;
@@ -1288,7 +1300,7 @@ let contagemProdutoAtual = null;
 
 function dispatchScanContagem(barcode) {
   if (!barcode) return;
-  const matches = findByEan(barcode);
+  const matches = findByEanOuCodigo(barcode);
   if (!matches || matches.length === 0) {
     showScanFeedback('❌ CÓDIGO NÃO ENCONTRADO NO CATÁLOGO', 'err', '#contagem-feedback');
     return;
