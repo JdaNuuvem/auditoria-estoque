@@ -182,8 +182,14 @@ def _paginated_fetch(entity, filter_fn=None, per_page=200):
 
 
 def refresh_cache():
-    """So confirma (ready + grava em disco) apos as 4 entidades sincronizarem por completo.
-    Uma falha parcial (ex: rate limit) mantem o cache anterior intacto em vez de gravar dados incompletos.
+    """Filiais e produtos entram no CACHE (e ficam disponiveis pra API/tela)
+    assim que terminam de baixar, sem esperar estoques/precos - catalogo,
+    codigo interno e busca por produto ja funcionam nesse ponto, so estoque
+    por loja e preco continuam mostrando o valor antigo ate o resto
+    terminar. So grava em disco (_save_cache_to_disk) quando as 4 entidades
+    tiverem terminado, pra nunca persistir um estado parcial; uma falha no
+    meio (ex: rate limit) mantem em memoria o que ja tinha sido baixado
+    dessa rodada, sem descartar pro estado anterior.
     'progress' vai sendo preenchido entidade-a-entidade so para a barra de progresso do front."""
     print("[cache] Iniciando sincronizacao com a API...")
     CACHE["loading"] = True
@@ -192,6 +198,7 @@ def refresh_cache():
         print("[cache] Baixando filiais...")
         filiais = _paginated_fetch("filiais", per_page=100)
         CACHE["progress"]["filiais"] = len(filiais)
+        CACHE["filiais"] = filiais
         print(f"[cache] {len(filiais)} filiais")
         print("[cache] Baixando produtos...")
         # Sem filtro de EAN: produtos sem codigo de barras (ex: alguns itens
@@ -200,21 +207,20 @@ def refresh_cache():
         # codigo interno (findByEanOuCodigo no frontend) conseguir achar.
         produtos = _paginated_fetch("produtos")
         CACHE["progress"]["produtos"] = len(produtos)
-        print(f"[cache] {len(produtos)} produtos")
+        CACHE["produtos"] = produtos
+        CACHE["ready"] = True
+        print(f"[cache] {len(produtos)} produtos (ja disponivel, estoques/precos ainda atualizando)")
         print("[cache] Baixando estoques...")
         estoques = _paginated_fetch("produtos_estoques", per_page=500)
         CACHE["progress"]["estoques"] = len(estoques)
+        CACHE["estoques"] = estoques
         print(f"[cache] {len(estoques)} estoques")
         print("[cache] Baixando precos...")
         precos = _paginated_fetch("precos", per_page=500)
         CACHE["progress"]["precos"] = len(precos)
+        CACHE["precos"] = precos
         print(f"[cache] {len(precos)} precos")
 
-        CACHE["filiais"] = filiais
-        CACHE["produtos"] = produtos
-        CACHE["estoques"] = estoques
-        CACHE["precos"] = precos
-        CACHE["ready"] = True
         CACHE["synced_at"] = datetime.now().isoformat()
         _save_cache_to_disk()
         print(f"[cache] Sincronizacao concluida: {len(produtos)} produtos, {len(estoques)} estoques, {len(precos)} precos")
