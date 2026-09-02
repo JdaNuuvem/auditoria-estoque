@@ -1,4 +1,5 @@
 import collections
+import gzip
 import hmac
 import json
 import os
@@ -19,6 +20,29 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+
+
+@app.after_request
+def _comprime_resposta(response):
+    """Comprime respostas grandes com gzip quando o cliente aceita -
+    /api/sales-cache e /api/cache/produtos passaram a vir com por_filial e
+    catalogo sem filtro de EAN, respectivamente, e ficaram pesados (4-5MB
+    sem compressao). JSON comprime bem (5-10x), e todo browser manda
+    'Accept-Encoding: gzip' - sem isso a aba Relatorios ficava lenta so pelo
+    tempo de rede pra baixar o payload."""
+    if (response.direct_passthrough
+            or response.content_length is not None and response.content_length < 1024
+            or "gzip" not in request.headers.get("Accept-Encoding", "")
+            or "Content-Encoding" in response.headers):
+        return response
+    data = response.get_data()
+    if len(data) < 1024:
+        return response
+    response.set_data(gzip.compress(data, compresslevel=6))
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = len(response.get_data())
+    return response
+
 
 API_BASE = "https://api.i9logic.net/v1"
 CLIENT_ID = os.environ["I9LOGIC_CLIENT_ID"]

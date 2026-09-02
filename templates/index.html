@@ -593,10 +593,15 @@ async function loadSessions() {
 // (persistido em sales_cache.json - so busca na API i9logic uma vez por
 // produto, depois sempre serve do cache). Usado pra mostrar a informacao
 // na lista de Produtos Existentes sem custar uma chamada por item.
-async function loadSalesCache() {
+let salesCacheLoadedAt = 0;
+const SALES_CACHE_TTL_MS = 3 * 60 * 1000; // vendas so atualizam 2x/dia (12h/22h) - nao precisa rebaixar o payload (MBs) a cada troca de aba
+
+async function loadSalesCache(forcar = false) {
+  if (!forcar && S.salesCache && Date.now() - salesCacheLoadedAt < SALES_CACHE_TTL_MS) return;
   try {
     const r = await apiGet('sales-cache');
     S.salesCache = r.cache || {};
+    salesCacheLoadedAt = Date.now();
   } catch (e) {
     S.salesCache = S.salesCache || {};
   }
