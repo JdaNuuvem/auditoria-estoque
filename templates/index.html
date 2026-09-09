@@ -2249,7 +2249,7 @@ async function abrirGaleriaAdmin(filialId) {
   const r = await apiGet('fotografo/fotos', { filialId });
   const fotos = r.fotos || [];
   $('#foto-galeria-admin-lista').innerHTML = fotos.length
-    ? fotos.map(f => `<a href="${f.url}" target="_blank"><img src="${f.url}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px"></a>`).join('')
+    ? fotos.map(f => `<a href="${f.url}" target="_blank" rel="noopener noreferrer"><img src="${f.url}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px"></a>`).join('')
     : '<div class="empty">Nenhuma foto ainda.</div>';
   $('#foto-galeria-admin-modal').style.display = 'flex';
 }
