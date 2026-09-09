@@ -290,6 +290,11 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         <button class="btn-p" id="btn-enviar-foto">Enviar</button>
       </div>
     </div>
+
+    <div id="foto-scanner-modal" style="position:fixed;inset:0;background:#000;z-index:300;display:none;flex-direction:column">
+      <video id="foto-scanner-video" autoplay playsinline style="flex:1;width:100%;object-fit:cover"></video>
+      <button class="close-btn" id="btn-fechar-foto-scanner" style="position:absolute;top:16px;right:16px;background:rgba(255,255,255,.2);color:#fff;border-radius:50%;width:44px;height:44px;font-size:1.5rem;display:flex;align-items:center;justify-content:center">×</button>
+    </div>
     <!-- REPORTS -->
     <div id="reports-view" style="display:none">
       <div class="report-tabs" id="report-tabs"></div>
@@ -2382,6 +2387,69 @@ function pularProdutoFotografo() {
   renderFotografoAtual();
 }
 
+let fotoScannerStream = null;
+let fotoScannerAtivo = false;
+
+async function abrirLeitorAvulso() {
+  if (!S.barcodeDetector) { toast('Leitor de código de barras não disponível neste navegador.', 'err'); return; }
+  try {
+    fotoScannerStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false,
+    });
+    const video = $('#foto-scanner-video');
+    video.srcObject = fotoScannerStream;
+    $('#foto-scanner-modal').style.display = 'flex';
+    fotoScannerAtivo = true;
+    fotoScannerLoop(video);
+  } catch (e) {
+    toast('Erro ao acessar câmera: ' + e.message, 'err');
+  }
+}
+
+function fecharLeitorAvulso() {
+  fotoScannerAtivo = false;
+  if (fotoScannerStream) {
+    fotoScannerStream.getTracks().forEach(t => t.stop());
+    fotoScannerStream = null;
+  }
+  $('#foto-scanner-video').srcObject = null;
+  $('#foto-scanner-modal').style.display = 'none';
+}
+
+function fotoScannerLoop(video) {
+  (async function loop() {
+    if (!fotoScannerAtivo) return;
+    try {
+      const barcodes = await S.barcodeDetector.detect(video);
+      if (barcodes.length > 0) {
+        fecharLeitorAvulso();
+        pularParaProdutoAvulso(barcodes[0].rawValue);
+        return;
+      }
+    } catch {}
+    requestAnimationFrame(() => fotoScannerLoop(video));
+  })();
+}
+
+function pularParaProdutoAvulso(codigo) {
+  const matches = findByEanOuCodigo(codigo);
+  if (!matches || matches.length === 0) {
+    toast('❌ Código não encontrado no catálogo.', 'err');
+    return;
+  }
+  const produtoId = matches[0].id;
+  const idx = S.fotografoFila.findIndex(p => p.id === produtoId);
+  if (idx === -1) {
+    toast('Este produto ainda não foi bipado nesta loja.', 'warn');
+    return;
+  }
+  const [produto] = S.fotografoFila.splice(idx, 1);
+  S.fotografoFila.unshift(produto);
+  S.fotografoAtual = produto;
+  renderFotografoAtual();
+  toast(`Pulou para: ${produto.descricao}`, 'ok');
+}
+
 function autoLoginIfSessionSaved() {
   const prevState = lsGet(LS_KEYS.state);
   if (prevState && prevState.email) {
@@ -2613,6 +2681,8 @@ async function init() {
   $('#btn-repetir-foto').addEventListener('click', repetirFoto);
   $('#btn-enviar-foto').addEventListener('click', enviarFotoAtual);
   $('#btn-pular-produto').addEventListener('click', pularProdutoFotografo);
+  $('#btn-ler-codigo-avulso').addEventListener('click', abrirLeitorAvulso);
+  $('#btn-fechar-foto-scanner').addEventListener('click', fecharLeitorAvulso);
 
   initScannerInput();
 }
