@@ -104,3 +104,47 @@ def test_fila_fotografo_loja_sem_bipagem_retorna_vazia(client):
     body = resp.get_json()
     assert body["fila"] == []
     assert body["total_bipado"] == 0
+
+
+def test_upload_foto_grava_arquivo_e_atualiza_registro(client):
+    foto_bytes = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+    resp = client.post("/api/fotografo/foto", data={
+        "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
+        "foto": (io.BytesIO(foto_bytes), "foto.jpg"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["arquivo"] == "1/10.jpg"
+
+    caminho = os.path.join(server.FOTOS_DIR, "1", "10.jpg")
+    assert os.path.exists(caminho)
+    with open(caminho, "rb") as f:
+        assert f.read() == foto_bytes
+
+    fotos = server._load_fotos()
+    assert fotos["1"]["10"]["arquivo"] == "1/10.jpg"
+    assert fotos["1"]["10"]["fotografadoPor"] == "foto1@x.com"
+    assert "fotografadoEm" in fotos["1"]["10"]
+
+
+def test_upload_foto_sobrescreve_arquivo_existente(client):
+    def _envia(conteudo):
+        return client.post("/api/fotografo/foto", data={
+            "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
+            "foto": (io.BytesIO(conteudo), "foto.jpg"),
+        }, content_type="multipart/form-data")
+
+    _envia(b"primeira-versao")
+    _envia(b"segunda-versao")
+
+    caminho = os.path.join(server.FOTOS_DIR, "1", "10.jpg")
+    with open(caminho, "rb") as f:
+        assert f.read() == b"segunda-versao"
+    fotos = server._load_fotos()
+    assert len(fotos["1"]) == 1
+
+
+def test_upload_foto_sem_campos_obrigatorios_retorna_400(client):
+    resp = client.post("/api/fotografo/foto", data={"filialId": "1"}, content_type="multipart/form-data")
+    assert resp.status_code == 400

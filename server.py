@@ -414,6 +414,7 @@ def audit_sessions():
 
 FOTOS_FILE = os.path.join(DATA_DIR, "fotos_por_filial.json")
 FOTOS_DIR = os.path.join(DATA_DIR, "fotos")
+_fotos_lock = threading.Lock()
 
 
 def _load_fotos():
@@ -467,6 +468,37 @@ def fotografo_fila():
         "ok": True, "fila": fila,
         "total_bipado": len(bipados), "total_fotografado": len(fotos),
     })
+
+
+@app.route("/api/fotografo/foto", methods=["POST"])
+def fotografo_upload_foto():
+    filial_id_raw = request.form.get("filialId")
+    produto_id_raw = request.form.get("produtoId")
+    fotografo_email = (request.form.get("fotografoEmail") or "").strip().lower()
+    arquivo = request.files.get("foto")
+    if filial_id_raw is None or produto_id_raw is None or not arquivo:
+        return jsonify({"ok": False, "error": "filialId, produtoId e foto sao obrigatorios."}), 400
+    try:
+        filial_id = int(filial_id_raw)
+        produto_id = int(produto_id_raw)
+    except ValueError:
+        return jsonify({"ok": False, "error": "filialId e produtoId devem ser numeros."}), 400
+
+    pasta_filial = os.path.join(FOTOS_DIR, str(filial_id))
+    os.makedirs(pasta_filial, exist_ok=True)
+    caminho = os.path.join(pasta_filial, f"{produto_id}.jpg")
+    arquivo.save(caminho)
+
+    with _fotos_lock:
+        fotos = _load_fotos()
+        fotos.setdefault(str(filial_id), {})[str(produto_id)] = {
+            "arquivo": f"{filial_id}/{produto_id}.jpg",
+            "fotografadoPor": fotografo_email,
+            "fotografadoEm": datetime.now().isoformat(),
+        }
+        _save_fotos(fotos)
+
+    return jsonify({"ok": True, "arquivo": f"{filial_id}/{produto_id}.jpg"})
 
 
 FASE2_FILE = os.path.join(DATA_DIR, "fase2_liberada.json")
