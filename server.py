@@ -22,6 +22,9 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8MB - limite de upload (fotos de produto)
+
+FOTO_MIMETYPES_PERMITIDOS = {"image/jpeg", "image/png"}
 
 
 @app.after_request
@@ -447,10 +450,35 @@ def _produtos_bipados_ordenados(filial_id):
     produtos_map = {p["id"]: p for p in CACHE.get("produtos", [])}
     resultado = []
     for pid_str in encontrados:
-        produto = produtos_map.get(int(pid_str))
+        try:
+            pid = int(pid_str)
+        except (TypeError, ValueError):
+            continue
+        produto = produtos_map.get(pid)
         if produto:
             resultado.append(produto)
     return resultado
+
+
+def _total_bipados(filial_id):
+    """Igual a _produtos_bipados_ordenados, mas so conta - nao monta objetos
+    de produto do catalogo. Usado pelo resumo (?resumo=1) pra evitar o custo
+    de reconstruir a fila inteira so pra exibir um progresso por loja."""
+    sessions = _load_audit()
+    matches = [s for s in sessions.values() if s.get("filialId") == filial_id]
+    encontrados = {}
+    for s in matches:
+        encontrados.update(s.get("encontrados") or {})
+    produto_ids = {p["id"] for p in CACHE.get("produtos", [])}
+    total = 0
+    for pid_str in encontrados:
+        try:
+            pid = int(pid_str)
+        except (TypeError, ValueError):
+            continue
+        if pid in produto_ids:
+            total += 1
+    return total
 
 
 @app.route("/api/fotografo/fila")
@@ -463,8 +491,15 @@ def fotografo_fila():
     except ValueError:
         return jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400
 
-    bipados = _produtos_bipados_ordenados(filial_id)
     fotos = _load_fotos().get(str(filial_id), {})
+
+    if request.args.get("resumo"):
+        total_bipado = _total_bipados(filial_id)
+        return jsonify({
+            "ok": True, "total_bipado": total_bipado, "total_fotografado": len(fotos),
+        })
+
+    bipados = _produtos_bipados_ordenados(filial_id)
     fila = [p for p in bipados if str(p["id"]) not in fotos]
     return jsonify({
         "ok": True, "fila": fila,
@@ -480,6 +515,8 @@ def fotografo_upload_foto():
     arquivo = request.files.get("foto")
     if filial_id_raw is None or produto_id_raw is None or not arquivo:
         return jsonify({"ok": False, "error": "filialId, produtoId e foto sao obrigatorios."}), 400
+    if arquivo.mimetype not in FOTO_MIMETYPES_PERMITIDOS:
+        return jsonify({"ok": False, "error": "Tipo de arquivo nao permitido. Envie uma imagem JPEG ou PNG."}), 400
     try:
         filial_id = int(filial_id_raw)
         produto_id = int(produto_id_raw)

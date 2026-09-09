@@ -2006,6 +2006,7 @@ function updateNavForRole() {
   $$('nav button[data-view]').forEach(b => {
     const v = b.dataset.view;
     if (adminOnly.includes(v)) b.style.display = S.isAdmin ? '' : 'none';
+    else if (v === 'audit') b.style.display = (S.user && S.user.role === 'fotografo') ? 'none' : '';
   });
 }
 
@@ -2222,7 +2223,7 @@ async function loadBipadoresList() {
 
 async function carregarProgressoFotosPorLoja() {
   const linhas = await Promise.all(S.filiais.map(async f => {
-    const r = await apiGet('fotografo/fila', { filialId: f.id });
+    const r = await apiGet('fotografo/fila', { filialId: f.id, resumo: 1 });
     return { filial: f, totalBipado: r.total_bipado || 0, totalFotografado: r.total_fotografado || 0 };
   }));
   $('#fotos-progresso-list').innerHTML = linhas.map(l => {
@@ -2344,7 +2345,7 @@ async function handleUpdateBipadorFilial(email, filialId) {
 function onAuthSuccess(user) {
   const filial = S.filiais.find(f => f.id === user.filialId);
   S.user = { ...user, filialNome: filial ? (filial.fantasia || filial.razaosocial) : 'Loja ' + user.filialId };
-  lsSet(LS_KEYS.state, { email: user.email, name: user.name, filialId: user.filialId });
+  lsSet(LS_KEYS.state, { email: user.email, name: user.name, filialId: user.filialId, role: user.role });
   if (S.user.role === 'fotografo') startFotografoInternal();
   else startAuditInternal();
 }
@@ -2357,6 +2358,7 @@ async function startFotografoInternal() {
   $('#fotografo-view').style.display = 'block';
   $('#hdr-filial').textContent = S.user.filialNome;
   $('#hdr-auditor').textContent = S.user.name;
+  if (!S.dataReady) await loadAllData();
   await loadFotografoFila();
 }
 
@@ -2542,7 +2544,7 @@ function fotoScannerLoop(video) {
   })();
 }
 
-function pularParaProdutoAvulso(codigo) {
+async function pularParaProdutoAvulso(codigo) {
   const matches = findByEanOuCodigo(codigo);
   if (!matches || matches.length === 0) {
     toast('❌ CÓDIGO NÃO ENCONTRADO NO CATÁLOGO', 'err');
@@ -2550,24 +2552,34 @@ function pularParaProdutoAvulso(codigo) {
   }
   const produtoId = matches[0].id;
   const idx = S.fotografoFila.findIndex(p => p.id === produtoId);
-  if (idx === -1) {
-    toast('Este produto ainda não foi bipado nesta loja.', 'warn');
+  if (idx !== -1) {
+    const [produto] = S.fotografoFila.splice(idx, 1);
+    S.fotografoFila.unshift(produto);
+    S.fotografoAtual = produto;
+    renderFotografoAtual();
+    toast(`Pulou para: ${produto.descricao}`, 'ok');
     return;
   }
-  const [produto] = S.fotografoFila.splice(idx, 1);
-  S.fotografoFila.unshift(produto);
-  S.fotografoAtual = produto;
-  renderFotografoAtual();
-  toast(`Pulou para: ${produto.descricao}`, 'ok');
+  // Nao esta na fila (sem foto) - checa se ja foi fotografado, pra permitir refotografar.
+  try {
+    const r = await apiGet('fotografo/fotos', { filialId: S.user.filialId });
+    const fotos = r.fotos || [];
+    if (fotos.some(f => f.produtoId === produtoId)) {
+      reFotografarProduto(produtoId);
+      return;
+    }
+  } catch (e) {}
+  toast('Este produto ainda não foi bipado nesta loja.', 'warn');
 }
 
 function autoLoginIfSessionSaved() {
   const prevState = lsGet(LS_KEYS.state);
   if (prevState && prevState.email) {
-    S.user = { name: prevState.name, email: prevState.email, filialId: prevState.filialId, filialNome: '' };
+    S.user = { name: prevState.name, email: prevState.email, filialId: prevState.filialId, role: prevState.role, filialNome: '' };
     const filial = S.filiais.find(f => f.id === prevState.filialId);
     if (filial) S.user.filialNome = filial.fantasia || filial.razaocial;
-    if (S.dataReady) startAuditInternal();
+    if (S.user.role === 'fotografo') startFotografoInternal();
+    else if (S.dataReady) startAuditInternal();
   }
 }
 
@@ -2585,6 +2597,9 @@ function handleLogout() {
   $('#hdr-filial-select').style.display = 'none';
   lsSet(LS_KEYS.state, null);
   if (S.cameraStream) stopCamera();
+  if (S.fotoStream) stopFotoCamera();
+  fecharLeitorAvulso();
+  $('#fotografo-view').style.display = 'none';
   $('#admin-password').value = '';
   $('#auth-admin').style.display = 'none';
   $('#auth-login').style.display = 'flex';
