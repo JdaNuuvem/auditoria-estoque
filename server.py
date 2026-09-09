@@ -538,9 +538,13 @@ def admin_zip_fotos():
     data = request.get_json(silent=True) or {}
     if not _admin_password_ok(data.get("adminPassword")):
         return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
-    filial_id = data.get("filialId")
-    if filial_id is None:
+    filial_id_param = data.get("filialId")
+    if filial_id_param is None:
         return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
+    try:
+        filial_id = int(filial_id_param)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400
 
     fotos_filial = _load_fotos().get(str(filial_id), {})
     if not fotos_filial:
