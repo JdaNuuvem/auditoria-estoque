@@ -362,6 +362,21 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         <div id="bip-error" style="color:var(--d600);font-size:.85rem;display:none;margin-top:8px"></div>
       </div>
       <div id="bipadores-list"></div>
+
+      <div class="card" style="margin-top:16px">
+        <h3 style="margin-bottom:12px">Fotografia por Loja</h3>
+        <div id="fotos-progresso-list"></div>
+      </div>
+
+      <div id="foto-galeria-admin-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:250;display:none;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto">
+        <div style="background:var(--surface);border-radius:var(--radius);padding:16px;max-width:700px;width:100%">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <strong id="foto-galeria-admin-titulo">Fotos</strong>
+            <button class="btn-o btn-sm" id="btn-fechar-galeria-admin">Fechar</button>
+          </div>
+          <div id="foto-galeria-admin-lista" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px"></div>
+        </div>
+      </div>
     </div>
     <div id="dedup-view" style="display:none">
       <div class="card" style="margin-bottom:16px">
@@ -1867,7 +1882,7 @@ async function switchView(view) {
     }
   }
   else if (view === 'debug') { $('#debug-view').style.display = 'block'; pullSyncedProducts(); }
-  else if (view === 'bipadores') { $('#bipadores-view').style.display = 'block'; popAdminFilialSelect(); loadBipadoresList(); }
+  else if (view === 'bipadores') { $('#bipadores-view').style.display = 'block'; popAdminFilialSelect(); loadBipadoresList(); carregarProgressoFotosPorLoja(); }
   else if (view === 'dedup') { $('#dedup-view').style.display = 'block'; popDedupFilialSelect(); }
   else if (view === 'loading') { $('#loading-view').style.display = 'flex'; }
   $$('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
@@ -2202,6 +2217,64 @@ async function loadBipadoresList() {
     }).join('');
   } catch (e) {
     toast('Erro ao carregar lista de bipadores.', 'warn');
+  }
+}
+
+async function carregarProgressoFotosPorLoja() {
+  const linhas = await Promise.all(S.filiais.map(async f => {
+    const r = await apiGet('fotografo/fila', { filialId: f.id });
+    return { filial: f, totalBipado: r.total_bipado || 0, totalFotografado: r.total_fotografado || 0 };
+  }));
+  $('#fotos-progresso-list').innerHTML = linhas.map(l => {
+    const pct = l.totalBipado > 0 ? Math.round((l.totalFotografado / l.totalBipado) * 100) : 0;
+    return `<div class="recent-row" style="cursor:default;flex-direction:column;align-items:stretch;gap:6px">
+      <div style="display:flex;justify-content:space-between">
+        <strong>${escapeHtml(l.filial.fantasia || l.filial.razaosocial)}</strong>
+        <span style="color:var(--muted);font-size:.8rem">${l.totalFotografado} de ${l.totalBipado} (${pct}%)</span>
+      </div>
+      <div style="background:var(--surface-2);border-radius:8px;height:8px;overflow:hidden">
+        <div style="background:var(--p500);height:100%;width:${pct}%"></div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn-o btn-sm" onclick="abrirGaleriaAdmin(${l.filial.id})">Ver fotos</button>
+        <button class="btn-s btn-sm" onclick="baixarZipFotos(${l.filial.id})">Baixar .zip</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function abrirGaleriaAdmin(filialId) {
+  const filial = S.filiais.find(f => f.id === filialId);
+  $('#foto-galeria-admin-titulo').textContent = 'Fotos — ' + (filial ? (filial.fantasia || filial.razaosocial) : filialId);
+  const r = await apiGet('fotografo/fotos', { filialId });
+  const fotos = r.fotos || [];
+  $('#foto-galeria-admin-lista').innerHTML = fotos.length
+    ? fotos.map(f => `<a href="${f.url}" target="_blank"><img src="${f.url}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px"></a>`).join('')
+    : '<div class="empty">Nenhuma foto ainda.</div>';
+  $('#foto-galeria-admin-modal').style.display = 'flex';
+}
+
+async function baixarZipFotos(filialId) {
+  try {
+    const resp = await fetch('/api/admin/fotos/zip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassword: S.adminPassword, filialId }),
+    });
+    if (!resp.ok) {
+      const r = await resp.json().catch(() => ({}));
+      toast('Erro ao baixar fotos: ' + (r.error || resp.status), 'err');
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `fotos_filial_${filialId}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    toast('Falha ao baixar fotos: sem conexão com o servidor.', 'err');
   }
 }
 
@@ -2684,6 +2757,7 @@ async function init() {
   $('#btn-export-csv').addEventListener('click', exportCSV);
   $('#btn-dedup-analyze').addEventListener('click', handleAnalyzeDuplicates);
   $('#btn-dedup-export').addEventListener('click', exportDedupCSV);
+  $('#btn-fechar-galeria-admin').addEventListener('click', () => $('#foto-galeria-admin-modal').style.display = 'none');
   $('#dedup-filial').addEventListener('change', () => {
     resetDedupState();
     const filialId = Number($('#dedup-filial').value);
