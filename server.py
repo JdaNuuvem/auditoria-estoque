@@ -752,6 +752,7 @@ def admin_create_bipador():
     email = (data.get("email") or "").strip().lower()
     filial_id = data.get("filialId")
     password = data.get("password")
+    role = data.get("role") if data.get("role") in ("bipador", "fotografo") else "bipador"
     if not name or not email or filial_id is None or not isinstance(password, str) or not password:
         return jsonify({"ok": False, "error": "Nome, email, senha e loja são obrigatórios."}), 400
     if len(password) < 6:
@@ -761,7 +762,7 @@ def admin_create_bipador():
         if email in users:
             return jsonify({"ok": False, "error": "Email já cadastrado."}), 409
         users[email] = {
-            "name": name, "email": email, "filialId": filial_id,
+            "name": name, "email": email, "filialId": filial_id, "role": role,
             "password_hash": generate_password_hash(password),
         }
         _save_users(users)
