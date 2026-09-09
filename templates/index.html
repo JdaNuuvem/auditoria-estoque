@@ -291,6 +291,16 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
       </div>
     </div>
 
+    <div id="foto-revisar-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:250;display:none;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto">
+      <div style="background:var(--surface);border-radius:var(--radius);padding:16px;max-width:600px;width:100%">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <strong>Já Fotografados</strong>
+          <button class="btn-o btn-sm" id="btn-fechar-revisar">Fechar</button>
+        </div>
+        <div id="foto-revisar-lista" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px"></div>
+      </div>
+    </div>
+
     <div id="foto-scanner-modal" style="position:fixed;inset:0;background:#000;z-index:300;display:none;flex-direction:column">
       <video id="foto-scanner-video" autoplay playsinline style="flex:1;width:100%;object-fit:cover"></video>
       <button class="close-btn" id="btn-fechar-foto-scanner" style="position:absolute;top:16px;right:16px;background:rgba(255,255,255,.2);color:#fff;border-radius:50%;width:44px;height:44px;font-size:1.5rem;display:flex;align-items:center;justify-content:center">×</button>
@@ -439,6 +449,7 @@ let S = {
   barcodeDetector: null,
   fotografoFila: [],
   fotografoAtual: null,
+  fotografoEmRevisao: null,
   fotoStream: null,
   fotoBlobAtual: null,
 };
@@ -2357,8 +2368,8 @@ function repetirFoto() {
 }
 
 async function enviarFotoAtual() {
-  if (!S.fotoBlobAtual || !S.fotografoAtual) return;
-  const produto = S.fotografoAtual;
+  const produto = S.fotografoEmRevisao || S.fotografoAtual;
+  if (!S.fotoBlobAtual || !produto) return;
   const form = new FormData();
   form.append('filialId', S.user.filialId);
   form.append('produtoId', produto.id);
@@ -2370,13 +2381,40 @@ async function enviarFotoAtual() {
     if (!r.ok) { toast('Erro ao enviar foto: ' + r.error, 'err'); return; }
     toast('Foto enviada!', 'ok');
     stopFotoCamera();
-    S.fotografoFila = S.fotografoFila.filter(p => p.id !== produto.id);
-    S.totalFotografado += 1;
-    S.fotografoAtual = S.fotografoFila[0] || null;
-    renderFotografoAtual();
+    if (S.fotografoEmRevisao) {
+      S.fotografoEmRevisao = null;
+      toast('Foto atualizada!', 'ok');
+    } else {
+      S.fotografoFila = S.fotografoFila.filter(p => p.id !== produto.id);
+      S.totalFotografado += 1;
+      S.fotografoAtual = S.fotografoFila[0] || null;
+      renderFotografoAtual();
+    }
   } catch (e) {
     toast('Falha ao enviar foto: sem conexão com o servidor.', 'err');
   }
+}
+
+async function abrirJaFotografados() {
+  const r = await apiGet('fotografo/fotos', { filialId: S.user.filialId });
+  const fotos = r.fotos || [];
+  $('#foto-revisar-lista').innerHTML = fotos.length
+    ? fotos.map(f => `
+      <div style="cursor:pointer;text-align:center" onclick="reFotografarProduto(${f.produtoId})">
+        <img src="${f.url}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px">
+        <div style="font-size:.7rem;color:var(--muted);margin-top:2px">#${f.produtoId}</div>
+      </div>
+    `).join('')
+    : '<div class="empty">Nenhuma foto enviada ainda.</div>';
+  $('#foto-revisar-modal').style.display = 'flex';
+}
+
+function reFotografarProduto(produtoId) {
+  const produto = S.productsMap[produtoId];
+  if (!produto) return;
+  S.fotografoEmRevisao = produto;
+  $('#foto-revisar-modal').style.display = 'none';
+  startFotoCamera();
 }
 
 function pularProdutoFotografo() {
@@ -2682,6 +2720,8 @@ async function init() {
   $('#btn-enviar-foto').addEventListener('click', enviarFotoAtual);
   $('#btn-pular-produto').addEventListener('click', pularProdutoFotografo);
   $('#btn-ler-codigo-avulso').addEventListener('click', abrirLeitorAvulso);
+  $('#btn-ja-fotografados').addEventListener('click', abrirJaFotografados);
+  $('#btn-fechar-revisar').addEventListener('click', () => $('#foto-revisar-modal').style.display = 'none');
   $('#btn-fechar-foto-scanner').addEventListener('click', fecharLeitorAvulso);
 
   initScannerInput();
