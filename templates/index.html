@@ -2434,7 +2434,7 @@ function fotoScannerLoop(video) {
 function pularParaProdutoAvulso(codigo) {
   const matches = findByEanOuCodigo(codigo);
   if (!matches || matches.length === 0) {
-    toast('❌ Código não encontrado no catálogo.', 'err');
+    toast('❌ CÓDIGO NÃO ENCONTRADO NO CATÁLOGO', 'err');
     return;
   }
   const produtoId = matches[0].id;
