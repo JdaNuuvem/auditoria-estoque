@@ -412,6 +412,63 @@ def audit_sessions():
     return jsonify({"ok": True, "sessions": list(sessions.values())})
 
 
+FOTOS_FILE = os.path.join(DATA_DIR, "fotos_por_filial.json")
+FOTOS_DIR = os.path.join(DATA_DIR, "fotos")
+
+
+def _load_fotos():
+    try:
+        with open(FOTOS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_fotos(fotos):
+    with open(FOTOS_FILE, "w", encoding="utf-8") as f:
+        json.dump(fotos, f, ensure_ascii=False)
+
+
+def _produtos_bipados_ordenados(filial_id):
+    """Mesma logica de getMergedSessionForFilial no frontend: junta os
+    'encontrados' de todas as sessoes da filial em ordem cronologica, e
+    devolve os produtos do catalogo correspondentes na ordem de bipagem."""
+    sessions = _load_audit()
+    matches = sorted(
+        (s for s in sessions.values() if s.get("filialId") == filial_id),
+        key=lambda s: (s.get("data") or "", s.get("inicio") or ""),
+    )
+    encontrados = {}
+    for s in matches:
+        encontrados.update(s.get("encontrados") or {})
+    produtos_map = {p["id"]: p for p in CACHE.get("produtos", [])}
+    resultado = []
+    for pid_str in encontrados:
+        produto = produtos_map.get(int(pid_str))
+        if produto:
+            resultado.append(produto)
+    return resultado
+
+
+@app.route("/api/fotografo/fila")
+def fotografo_fila():
+    filial_id_param = request.args.get("filialId")
+    if filial_id_param is None:
+        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
+    try:
+        filial_id = int(filial_id_param)
+    except ValueError:
+        return jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400
+
+    bipados = _produtos_bipados_ordenados(filial_id)
+    fotos = _load_fotos().get(str(filial_id), {})
+    fila = [p for p in bipados if str(p["id"]) not in fotos]
+    return jsonify({
+        "ok": True, "fila": fila,
+        "total_bipado": len(bipados), "total_fotografado": len(fotos),
+    })
+
+
 FASE2_FILE = os.path.join(DATA_DIR, "fase2_liberada.json")
 
 
