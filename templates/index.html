@@ -86,6 +86,12 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
 #camera-modal .cam-controls{position:absolute;bottom:30px;left:50%;transform:translateX(-50%);display:flex;gap:12px}
 #camera-modal .close-btn{position:absolute;top:16px;right:16px;background:rgba(255,255,255,.2);color:#fff;border-radius:50%;width:44px;height:44px;font-size:1.5rem;display:flex;align-items:center;justify-content:center}
 
+#foto-camera-modal{position:fixed;inset:0;background:#000;z-index:300;display:none;flex-direction:column}
+#foto-camera-modal.active{display:flex}
+#foto-camera-modal video,#foto-camera-modal img{flex:1;width:100%;object-fit:cover}
+#foto-camera-modal .cam-controls{position:absolute;bottom:30px;left:50%;transform:translateX(-50%);display:flex;gap:12px}
+#foto-camera-modal .close-btn{position:absolute;top:16px;right:16px;background:rgba(255,255,255,.2);color:#fff;border-radius:50%;width:44px;height:44px;font-size:1.5rem;display:flex;align-items:center;justify-content:center}
+
 #contagem-modal{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:300;display:none;align-items:center;justify-content:center;padding:16px}
 #contagem-modal.active{display:flex}
 #contagem-modal .qty-modal-content{background:var(--surface);border-radius:var(--radius);padding:24px;max-width:360px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.25)}
@@ -253,7 +259,37 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
       </div>
     </div>
     <!-- FOTOGRAFO -->
-    <div id="fotografo-view" style="display:none"></div>
+    <div id="fotografo-view" style="display:none">
+      <div style="padding:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <strong id="foto-progresso-texto">0 de 0 fotografados</strong>
+          <button class="btn-o btn-sm" id="btn-ja-fotografados">Já fotografados</button>
+        </div>
+        <div style="background:var(--surface-2);border-radius:8px;height:10px;overflow:hidden;margin-bottom:16px">
+          <div id="foto-progresso-barra" style="background:var(--p500);height:100%;width:0%;transition:width .3s"></div>
+        </div>
+        <div id="foto-produto-atual" class="card" style="text-align:center;padding:24px"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;justify-content:center">
+          <button class="btn-p" id="btn-abrir-camera-foto">Tirar Foto</button>
+          <button class="btn-o" id="btn-pular-produto">Pular</button>
+          <button class="btn-o" id="btn-ler-codigo-avulso">Ler Código de Barras</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="foto-camera-modal">
+      <video id="foto-camera-video" autoplay playsinline></video>
+      <canvas id="foto-canvas" style="display:none"></canvas>
+      <img id="foto-preview-img" style="display:none">
+      <button class="close-btn" id="btn-fechar-foto-camera">×</button>
+      <div class="cam-controls" id="foto-cam-controls-video">
+        <button class="btn-p" id="btn-capturar-foto">Capturar</button>
+      </div>
+      <div class="cam-controls" id="foto-cam-controls-preview" style="display:none">
+        <button class="btn-o" id="btn-repetir-foto">Repetir</button>
+        <button class="btn-p" id="btn-enviar-foto">Enviar</button>
+      </div>
+    </div>
     <!-- REPORTS -->
     <div id="reports-view" style="display:none">
       <div class="report-tabs" id="report-tabs"></div>
@@ -396,6 +432,10 @@ let S = {
   cameraStream: null,
   cameraActive: false,
   barcodeDetector: null,
+  fotografoFila: [],
+  fotografoAtual: null,
+  fotoStream: null,
+  fotoBlobAtual: null,
 };
 
 /* ===== UTILITY ===== */
@@ -2220,7 +2260,6 @@ function onAuthSuccess(user) {
   else startAuditInternal();
 }
 
-// Placeholder minimo — populada de verdade na Task 7 (carregar fila, renderizar produto atual).
 async function startFotografoInternal() {
   $('#setup-modal').style.display = 'none';
   $('#app').classList.add('active');
@@ -2229,6 +2268,118 @@ async function startFotografoInternal() {
   $('#fotografo-view').style.display = 'block';
   $('#hdr-filial').textContent = S.user.filialNome;
   $('#hdr-auditor').textContent = S.user.name;
+  await loadFotografoFila();
+}
+
+async function loadFotografoFila() {
+  const r = await apiGet('fotografo/fila', { filialId: S.user.filialId });
+  S.fotografoFila = r.fila || [];
+  S.totalBipado = r.total_bipado || 0;
+  S.totalFotografado = r.total_fotografado || 0;
+  S.fotografoAtual = S.fotografoFila[0] || null;
+  renderFotografoAtual();
+}
+
+function renderFotografoAtual() {
+  $('#foto-progresso-texto').textContent = `${S.totalFotografado} de ${S.totalBipado} fotografados`;
+  const pct = S.totalBipado > 0 ? Math.round((S.totalFotografado / S.totalBipado) * 100) : 0;
+  $('#foto-progresso-barra').style.width = pct + '%';
+
+  const el = $('#foto-produto-atual');
+  if (!S.fotografoAtual) {
+    el.innerHTML = '<strong>Loja concluída!</strong><p style="color:var(--muted);margin-top:8px">Todos os produtos bipados já foram fotografados.</p>';
+    $('#btn-abrir-camera-foto').disabled = true;
+    $('#btn-pular-produto').disabled = true;
+    return;
+  }
+  $('#btn-abrir-camera-foto').disabled = false;
+  $('#btn-pular-produto').disabled = false;
+  const p = S.fotografoAtual;
+  el.innerHTML = `<strong style="font-size:1.1rem">${escapeHtml(p.descricao)}</strong>
+    <div style="color:var(--muted);font-size:.85rem;margin-top:4px">SKU: ${escapeHtml(p.codproduto || '-')} | EAN: ${escapeHtml(p.ean || '-')}</div>`;
+}
+
+async function startFotoCamera() {
+  try {
+    S.fotoStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 } },
+      audio: false,
+    });
+    $('#foto-camera-video').srcObject = S.fotoStream;
+    $('#foto-camera-video').style.display = 'block';
+    $('#foto-preview-img').style.display = 'none';
+    $('#foto-cam-controls-video').style.display = 'flex';
+    $('#foto-cam-controls-preview').style.display = 'none';
+    $('#foto-camera-modal').classList.add('active');
+  } catch (e) {
+    toast('Erro ao acessar câmera: ' + e.message, 'err');
+  }
+}
+
+function stopFotoCamera() {
+  if (S.fotoStream) {
+    S.fotoStream.getTracks().forEach(t => t.stop());
+    S.fotoStream = null;
+  }
+  $('#foto-camera-modal').classList.remove('active');
+  S.fotoBlobAtual = null;
+}
+
+function capturarFoto() {
+  const video = $('#foto-camera-video');
+  const canvas = $('#foto-canvas');
+  const maxLado = 1600;
+  const escala = Math.min(1, maxLado / Math.max(video.videoWidth, video.videoHeight));
+  canvas.width = video.videoWidth * escala;
+  canvas.height = video.videoHeight * escala;
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob((blob) => {
+    S.fotoBlobAtual = blob;
+    $('#foto-preview-img').src = URL.createObjectURL(blob);
+    $('#foto-camera-video').style.display = 'none';
+    $('#foto-preview-img').style.display = 'block';
+    $('#foto-cam-controls-video').style.display = 'none';
+    $('#foto-cam-controls-preview').style.display = 'flex';
+  }, 'image/jpeg', 0.85);
+}
+
+function repetirFoto() {
+  S.fotoBlobAtual = null;
+  $('#foto-camera-video').style.display = 'block';
+  $('#foto-preview-img').style.display = 'none';
+  $('#foto-cam-controls-video').style.display = 'flex';
+  $('#foto-cam-controls-preview').style.display = 'none';
+}
+
+async function enviarFotoAtual() {
+  if (!S.fotoBlobAtual || !S.fotografoAtual) return;
+  const produto = S.fotografoAtual;
+  const form = new FormData();
+  form.append('filialId', S.user.filialId);
+  form.append('produtoId', produto.id);
+  form.append('fotografoEmail', S.user.email);
+  form.append('foto', S.fotoBlobAtual, 'foto.jpg');
+  try {
+    const resp = await fetch('/api/fotografo/foto', { method: 'POST', body: form });
+    const r = await resp.json();
+    if (!r.ok) { toast('Erro ao enviar foto: ' + r.error, 'err'); return; }
+    toast('Foto enviada!', 'ok');
+    stopFotoCamera();
+    S.fotografoFila = S.fotografoFila.filter(p => p.id !== produto.id);
+    S.totalFotografado += 1;
+    S.fotografoAtual = S.fotografoFila[0] || null;
+    renderFotografoAtual();
+  } catch (e) {
+    toast('Falha ao enviar foto: sem conexão com o servidor.', 'err');
+  }
+}
+
+function pularProdutoFotografo() {
+  if (!S.fotografoAtual) return;
+  const pulado = S.fotografoFila.shift();
+  S.fotografoFila.push(pulado);
+  S.fotografoAtual = S.fotografoFila[0] || null;
+  renderFotografoAtual();
 }
 
 function autoLoginIfSessionSaved() {
@@ -2454,6 +2605,14 @@ async function init() {
       toast('Busque um produto sem código de barras primeiro.', 'warn');
     }
   });
+
+  // Event: fotografo
+  $('#btn-abrir-camera-foto').addEventListener('click', startFotoCamera);
+  $('#btn-fechar-foto-camera').addEventListener('click', stopFotoCamera);
+  $('#btn-capturar-foto').addEventListener('click', capturarFoto);
+  $('#btn-repetir-foto').addEventListener('click', repetirFoto);
+  $('#btn-enviar-foto').addEventListener('click', enviarFotoAtual);
+  $('#btn-pular-produto').addEventListener('click', pularProdutoFotografo);
 
   initScannerInput();
 }
