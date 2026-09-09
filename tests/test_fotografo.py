@@ -148,3 +148,43 @@ def test_upload_foto_sobrescreve_arquivo_existente(client):
 def test_upload_foto_sem_campos_obrigatorios_retorna_400(client):
     resp = client.post("/api/fotografo/foto", data={"filialId": "1"}, content_type="multipart/form-data")
     assert resp.status_code == 400
+
+
+def test_servir_foto_retorna_arquivo(client):
+    client.post("/api/fotografo/foto", data={
+        "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
+        "foto": (io.BytesIO(b"conteudo-da-foto"), "foto.jpg"),
+    }, content_type="multipart/form-data")
+
+    resp = client.get("/api/fotos/1/10.jpg")
+    assert resp.status_code == 200
+    assert resp.data == b"conteudo-da-foto"
+
+
+def test_servir_foto_inexistente_retorna_404(client):
+    resp = client.get("/api/fotos/1/999.jpg")
+    assert resp.status_code == 404
+
+
+def test_listar_fotos_da_loja(client):
+    client.post("/api/fotografo/foto", data={
+        "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
+        "foto": (io.BytesIO(b"a"), "a.jpg"),
+    }, content_type="multipart/form-data")
+    client.post("/api/fotografo/foto", data={
+        "filialId": "1", "produtoId": "20", "fotografoEmail": "foto1@x.com",
+        "foto": (io.BytesIO(b"b"), "b.jpg"),
+    }, content_type="multipart/form-data")
+
+    resp = client.get("/api/fotografo/fotos?filialId=1")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert len(body["fotos"]) == 2
+    ids = {f["produtoId"] for f in body["fotos"]}
+    assert ids == {10, 20}
+    assert body["fotos"][0]["url"].startswith("/api/fotos/1/")
+
+
+def test_listar_fotos_sem_filial_id_retorna_400(client):
+    resp = client.get("/api/fotografo/fotos")
+    assert resp.status_code == 400

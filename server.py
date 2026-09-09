@@ -501,6 +501,36 @@ def fotografo_upload_foto():
     return jsonify({"ok": True, "arquivo": f"{filial_id}/{produto_id}.jpg"})
 
 
+@app.route("/api/fotos/<int:filial_id>/<int:produto_id>.jpg")
+def servir_foto(filial_id, produto_id):
+    caminho = os.path.join(FOTOS_DIR, str(filial_id), f"{produto_id}.jpg")
+    if not os.path.isfile(caminho):
+        return jsonify({"ok": False, "error": "Foto nao encontrada."}), 404
+    return send_file(caminho, mimetype="image/jpeg")
+
+
+@app.route("/api/fotografo/fotos")
+def fotografo_listar_fotos():
+    filial_id_param = request.args.get("filialId")
+    if filial_id_param is None:
+        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
+    try:
+        filial_id = int(filial_id_param)
+    except ValueError:
+        return jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400
+
+    fotos_filial = _load_fotos().get(str(filial_id), {})
+    resultado = [
+        {
+            "produtoId": int(pid),
+            "url": f"/api/fotos/{filial_id}/{pid}.jpg",
+            "fotografadoEm": info.get("fotografadoEm"),
+        }
+        for pid, info in fotos_filial.items()
+    ]
+    return jsonify({"ok": True, "fotos": resultado})
+
+
 FASE2_FILE = os.path.join(DATA_DIR, "fase2_liberada.json")
 
 
