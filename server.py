@@ -1,11 +1,13 @@
 import collections
 import gzip
 import hmac
+import io
 import json
 import os
 import time
 import threading
 import unicodedata
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -529,6 +531,30 @@ def fotografo_listar_fotos():
         for pid, info in fotos_filial.items()
     ]
     return jsonify({"ok": True, "fotos": resultado})
+
+
+@app.route("/api/admin/fotos/zip", methods=["POST"])
+def admin_zip_fotos():
+    data = request.get_json(silent=True) or {}
+    if not _admin_password_ok(data.get("adminPassword")):
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    filial_id = data.get("filialId")
+    if filial_id is None:
+        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
+
+    fotos_filial = _load_fotos().get(str(filial_id), {})
+    if not fotos_filial:
+        return jsonify({"ok": False, "error": "Nenhuma foto encontrada para esta loja."}), 404
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for produto_id in fotos_filial:
+            caminho = os.path.join(FOTOS_DIR, str(filial_id), f"{produto_id}.jpg")
+            if os.path.isfile(caminho):
+                zf.write(caminho, arcname=f"{produto_id}.jpg")
+    buffer.seek(0)
+    return send_file(buffer, mimetype="application/zip", as_attachment=True,
+                      download_name=f"fotos_filial_{filial_id}.zip")
 
 
 FASE2_FILE = os.path.join(DATA_DIR, "fase2_liberada.json")

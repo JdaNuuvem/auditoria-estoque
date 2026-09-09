@@ -188,3 +188,34 @@ def test_listar_fotos_da_loja(client):
 def test_listar_fotos_sem_filial_id_retorna_400(client):
     resp = client.get("/api/fotografo/fotos")
     assert resp.status_code == 400
+
+
+def test_zip_fotos_da_loja(client):
+    client.post("/api/fotografo/foto", data={
+        "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
+        "foto": (io.BytesIO(b"conteudo-a"), "a.jpg"),
+    }, content_type="multipart/form-data")
+    client.post("/api/fotografo/foto", data={
+        "filialId": "1", "produtoId": "20", "fotografoEmail": "foto1@x.com",
+        "foto": (io.BytesIO(b"conteudo-b"), "b.jpg"),
+    }, content_type="multipart/form-data")
+
+    resp = client.post("/api/admin/fotos/zip", json={**_admin(), "filialId": 1})
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/zip"
+
+    zip_bytes = io.BytesIO(resp.data)
+    with zipfile.ZipFile(zip_bytes) as zf:
+        nomes = set(zf.namelist())
+        assert nomes == {"10.jpg", "20.jpg"}
+        assert zf.read("10.jpg") == b"conteudo-a"
+
+
+def test_zip_fotos_senha_errada_retorna_403(client):
+    resp = client.post("/api/admin/fotos/zip", json={"adminPassword": "errada", "filialId": 1})
+    assert resp.status_code == 403
+
+
+def test_zip_fotos_loja_sem_fotos_retorna_404(client):
+    resp = client.post("/api/admin/fotos/zip", json={**_admin(), "filialId": 999})
+    assert resp.status_code == 404
