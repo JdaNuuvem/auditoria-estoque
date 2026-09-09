@@ -252,6 +252,8 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         </div>
       </div>
     </div>
+    <!-- FOTOGRAFO -->
+    <div id="fotografo-view" style="display:none"></div>
     <!-- REPORTS -->
     <div id="reports-view" style="display:none">
       <div class="report-tabs" id="report-tabs"></div>
@@ -294,12 +296,16 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
     <!-- BIPADORES (admin) -->
     <div id="bipadores-view" style="display:none">
       <div class="card" style="margin-bottom:16px">
-        <h3 style="margin-bottom:12px">Novo Bipador</h3>
+        <h3 style="margin-bottom:12px">Novo Usuário</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <input id="bip-name" placeholder="Nome completo" style="flex:1;min-width:150px">
           <input id="bip-email" type="email" placeholder="Email" style="flex:1;min-width:150px">
           <input id="bip-password" type="password" placeholder="Senha (min. 6 caracteres)" autocomplete="new-password" style="flex:1;min-width:150px">
           <select id="bip-filial" style="flex:1;min-width:150px"><option value="">Carregando lojas...</option></select>
+          <select id="bip-role" style="flex:1;min-width:150px">
+            <option value="bipador">Bipador</option>
+            <option value="fotografo">Fotógrafo</option>
+          </select>
           <button class="btn-s" id="btn-create-bipador">Cadastrar</button>
         </div>
         <div id="bip-error" style="color:var(--d600);font-size:.85rem;display:none;margin-top:8px"></div>
@@ -2149,21 +2155,23 @@ async function handleCreateBipador() {
   const email = $('#bip-email').value.trim();
   const password = $('#bip-password').value;
   const filialId = Number($('#bip-filial').value);
+  const role = $('#bip-role').value;
   if (!name || !email || !password || !filialId) { showAuthError('bip', 'Preencha todos os campos.'); return; }
   if (password.length < 6) { showAuthError('bip', 'Senha deve ter pelo menos 6 caracteres.'); return; }
   try {
     const resp = await fetch('/api/admin/bipadores', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ adminPassword: S.adminPassword, name, email, password, filialId }),
+      body: JSON.stringify({ adminPassword: S.adminPassword, name, email, password, filialId, role }),
     });
     const r = await resp.json();
     if (!r.ok) { showAuthError('bip', r.error); return; }
-    toast('Bipador cadastrado!', 'ok');
+    toast('Usuário cadastrado!', 'ok');
     $('#bip-name').value = '';
     $('#bip-email').value = '';
     $('#bip-password').value = '';
     $('#bip-filial').value = '';
+    $('#bip-role').value = 'bipador';
     loadBipadoresList();
   } catch (e) {
     showAuthError('bip', 'Erro ao cadastrar bipador: sem conexão com o servidor.');
@@ -2208,7 +2216,19 @@ function onAuthSuccess(user) {
   const filial = S.filiais.find(f => f.id === user.filialId);
   S.user = { ...user, filialNome: filial ? (filial.fantasia || filial.razaosocial) : 'Loja ' + user.filialId };
   lsSet(LS_KEYS.state, { email: user.email, name: user.name, filialId: user.filialId });
-  startAuditInternal();
+  if (S.user.role === 'fotografo') startFotografoInternal();
+  else startAuditInternal();
+}
+
+// Placeholder minimo — populada de verdade na Task 7 (carregar fila, renderizar produto atual).
+async function startFotografoInternal() {
+  $('#setup-modal').style.display = 'none';
+  $('#app').classList.add('active');
+  $$('nav button[data-view]').forEach(b => b.style.display = 'none');
+  ['dashboard-view', 'audit-view', 'reports-view', 'debug-view', 'bipadores-view', 'dedup-view'].forEach(id => $(`#${id}`).style.display = 'none');
+  $('#fotografo-view').style.display = 'block';
+  $('#hdr-filial').textContent = S.user.filialNome;
+  $('#hdr-auditor').textContent = S.user.name;
 }
 
 function autoLoginIfSessionSaved() {
