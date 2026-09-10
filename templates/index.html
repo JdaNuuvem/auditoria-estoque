@@ -181,6 +181,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
       <button data-view="reports">Relatórios</button>
       <button data-view="debug">Diagnóstico API</button>
       <button data-view="bipadores" style="display:none">Bipadores</button>
+      <button data-view="fotos" style="display:none">Fotografias</button>
       <button data-view="dedup" style="display:none">Deduplicação</button>
     </nav>
   </header>
@@ -362,8 +363,9 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         <div id="bip-error" style="color:var(--d600);font-size:.85rem;display:none;margin-top:8px"></div>
       </div>
       <div id="bipadores-list"></div>
-
-      <div class="card" style="margin-top:16px">
+    </div>
+    <div id="fotos-view" style="display:none">
+      <div class="card">
         <h3 style="margin-bottom:12px">Fotografia por Loja</h3>
         <div id="fotos-progresso-list"></div>
       </div>
@@ -1857,7 +1859,7 @@ function exportCSV() {
 /* ===== VIEW SWITCH ===== */
 async function switchView(view) {
   S.view = view;
-  ['loading-view', 'dashboard-view', 'audit-view', 'reports-view', 'debug-view', 'bipadores-view', 'dedup-view'].forEach(id => $(`#${id}`).style.display = 'none');
+  ['loading-view', 'dashboard-view', 'audit-view', 'reports-view', 'debug-view', 'bipadores-view', 'fotos-view', 'dedup-view'].forEach(id => $(`#${id}`).style.display = 'none');
   if (view === 'dashboard') {
     $('#dashboard-view').style.display = 'block';
     renderDashboard();
@@ -1893,7 +1895,8 @@ async function switchView(view) {
     }
   }
   else if (view === 'debug') { $('#debug-view').style.display = 'block'; pullSyncedProducts(); }
-  else if (view === 'bipadores') { $('#bipadores-view').style.display = 'block'; popAdminFilialSelect(); loadBipadoresList(); carregarProgressoFotosPorLoja(); }
+  else if (view === 'bipadores') { $('#bipadores-view').style.display = 'block'; popAdminFilialSelect(); loadBipadoresList(); }
+  else if (view === 'fotos') { $('#fotos-view').style.display = 'block'; carregarProgressoFotosPorLoja(); }
   else if (view === 'dedup') { $('#dedup-view').style.display = 'block'; popDedupFilialSelect(); }
   else if (view === 'loading') { $('#loading-view').style.display = 'flex'; }
   $$('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
@@ -2013,7 +2016,7 @@ async function handleAdminLogin() {
 }
 
 function updateNavForRole() {
-  const adminOnly = ['dashboard', 'reports', 'debug', 'bipadores', 'dedup'];
+  const adminOnly = ['dashboard', 'reports', 'debug', 'bipadores', 'fotos', 'dedup'];
   $$('nav button[data-view]').forEach(b => {
     const v = b.dataset.view;
     if (adminOnly.includes(v)) b.style.display = S.isAdmin ? '' : 'none';
@@ -2365,7 +2368,7 @@ async function startFotografoInternal() {
   $('#setup-modal').style.display = 'none';
   $('#app').classList.add('active');
   $$('nav button[data-view]').forEach(b => b.style.display = 'none');
-  ['dashboard-view', 'audit-view', 'reports-view', 'debug-view', 'bipadores-view', 'dedup-view'].forEach(id => $(`#${id}`).style.display = 'none');
+  ['dashboard-view', 'audit-view', 'reports-view', 'debug-view', 'bipadores-view', 'fotos-view', 'dedup-view'].forEach(id => $(`#${id}`).style.display = 'none');
   $('#fotografo-view').style.display = 'block';
   $('#hdr-filial').textContent = S.user.filialNome;
   $('#hdr-auditor').textContent = S.user.name;
