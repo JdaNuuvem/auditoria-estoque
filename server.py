@@ -1,11 +1,14 @@
 import collections
 import gzip
+import hashlib
 import hmac
+import io
 import json
 import os
 import time
 import threading
 import unicodedata
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -20,6 +23,18 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8MB - limite de upload (fotos de produto)
+
+FOTO_MIMETYPES_PERMITIDOS = {"image/jpeg", "image/png"}
+FOTO_ASSINATURAS = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")
+
+
+def _assinatura_de_imagem_ok(stream):
+    """O mimetype do upload vem do cliente e mente. Confere os magic bytes do
+    conteudo antes de gravar, e devolve o stream pro inicio pro save()."""
+    cabecalho = stream.read(8)
+    stream.seek(0)
+    return any(cabecalho.startswith(a) for a in FOTO_ASSINATURAS)
 
 
 @app.after_request
@@ -54,6 +69,36 @@ if len(ADMIN_PASSWORD) < 8:
 
 def _admin_password_ok(candidate):
     return hmac.compare_digest(str(candidate or "").encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
+
+
+def _admin_header_ok():
+    """Admin autenticado por header (X-Admin-Password) em vez de query string -
+    querystring vaza em log de acesso e no Referer."""
+    return _admin_password_ok(request.headers.get("X-Admin-Password"))
+
+
+def _user_token(user):
+    """Token derivado do email + hash da senha, assinado com a chave do servidor.
+    Trocar/redefinir a senha invalida os tokens antigos automaticamente, e o
+    token nao carrega segredo nenhum que sirva pra outra coisa."""
+    msg = f"{user.get('email', '')}|{user.get('password_hash', '')}".encode("utf-8")
+    return hmac.new(ADMIN_PASSWORD.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+
+def _usuario_autenticado(roles=None):
+    """Usuario provado pelos headers X-Auth-Email/X-Auth-Token, ou None.
+    Nunca confie em filialId/email vindos do corpo da requisicao - eles saem
+    daqui, do registro do usuario."""
+    email = (request.headers.get("X-Auth-Email") or "").strip().lower()
+    token = request.headers.get("X-Auth-Token") or ""
+    user = _load_users().get(email)
+    if not user or not user.get("password_hash"):
+        return None
+    if not hmac.compare_digest(token, _user_token(user)):
+        return None
+    if roles is not None and user.get("role") not in roles:
+        return None
+    return user
 
 
 # Chave separada da senha de admin - uso machine-to-machine (outro app
@@ -412,6 +457,209 @@ def audit_sessions():
     return jsonify({"ok": True, "sessions": list(sessions.values())})
 
 
+FOTOS_FILE = os.path.join(DATA_DIR, "fotos_por_filial.json")
+FOTOS_DIR = os.path.join(DATA_DIR, "fotos")
+_fotos_lock = threading.Lock()
+
+
+def _load_fotos():
+    try:
+        with open(FOTOS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_fotos(fotos):
+    with open(FOTOS_FILE, "w", encoding="utf-8") as f:
+        json.dump(fotos, f, ensure_ascii=False)
+
+
+def _produtos_bipados_ordenados(filial_id):
+    """Mesma logica de getMergedSessionForFilial no frontend: junta os
+    'encontrados' de todas as sessoes da filial em ordem cronologica, e
+    devolve os produtos do catalogo correspondentes na ordem de bipagem."""
+    sessions = _load_audit()
+    matches = sorted(
+        (s for s in sessions.values() if s.get("filialId") == filial_id),
+        key=lambda s: (s.get("data") or "", s.get("inicio") or ""),
+    )
+    encontrados = {}
+    for s in matches:
+        encontrados.update(s.get("encontrados") or {})
+    produtos_map = {p["id"]: p for p in CACHE.get("produtos", [])}
+    resultado = []
+    for pid_str in encontrados:
+        try:
+            pid = int(pid_str)
+        except (TypeError, ValueError):
+            continue
+        produto = produtos_map.get(pid)
+        if produto:
+            resultado.append(produto)
+    return resultado
+
+
+def _total_bipados(filial_id):
+    """Igual a _produtos_bipados_ordenados, mas so conta - nao monta objetos
+    de produto do catalogo. Usado pelo resumo (?resumo=1) pra evitar o custo
+    de reconstruir a fila inteira so pra exibir um progresso por loja."""
+    sessions = _load_audit()
+    matches = [s for s in sessions.values() if s.get("filialId") == filial_id]
+    encontrados = {}
+    for s in matches:
+        encontrados.update(s.get("encontrados") or {})
+    produto_ids = {p["id"] for p in CACHE.get("produtos", [])}
+    total = 0
+    for pid_str in encontrados:
+        try:
+            pid = int(pid_str)
+        except (TypeError, ValueError):
+            continue
+        if pid in produto_ids:
+            total += 1
+    return total
+
+
+def _filial_autorizada():
+    """Resolve a loja que o chamador pode ver. Admin (header) escolhe qualquer
+    uma via ?filialId; usuario comum fica preso a loja do proprio cadastro.
+    Retorna (filial_id, None) ou (None, resposta_de_erro)."""
+    if _admin_header_ok():
+        filial_id_param = request.args.get("filialId")
+        if filial_id_param is None:
+            return None, (jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400)
+        try:
+            return int(filial_id_param), None
+        except ValueError:
+            return None, (jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400)
+
+    user = _usuario_autenticado(("fotografo", "bipador"))
+    if not user:
+        return None, (jsonify({"ok": False, "error": "Nao autorizado."}), 401)
+    try:
+        return int(user.get("filialId")), None
+    except (TypeError, ValueError):
+        return None, (jsonify({"ok": False, "error": "Usuario sem loja valida."}), 403)
+
+
+@app.route("/api/fotografo/fila")
+def fotografo_fila():
+    filial_id, erro = _filial_autorizada()
+    if erro:
+        return erro
+
+    fotos = _load_fotos().get(str(filial_id), {})
+
+    if request.args.get("resumo"):
+        total_bipado = _total_bipados(filial_id)
+        return jsonify({
+            "ok": True, "total_bipado": total_bipado, "total_fotografado": len(fotos),
+        })
+
+    bipados = _produtos_bipados_ordenados(filial_id)
+    fila = [p for p in bipados if str(p["id"]) not in fotos]
+    return jsonify({
+        "ok": True, "fila": fila,
+        "total_bipado": len(bipados), "total_fotografado": len(fotos),
+    })
+
+
+@app.route("/api/fotografo/foto", methods=["POST"])
+def fotografo_upload_foto():
+    user = _usuario_autenticado(("fotografo", "bipador"))
+    if not user:
+        return jsonify({"ok": False, "error": "Nao autorizado."}), 401
+    # Loja e autor saem do cadastro do usuario, nunca do formulario - senao
+    # qualquer um grava foto em qualquer loja e assina com o email que quiser.
+    fotografo_email = user["email"]
+    try:
+        filial_id = int(user.get("filialId"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Usuario sem loja valida."}), 403
+
+    produto_id_raw = request.form.get("produtoId")
+    arquivo = request.files.get("foto")
+    if produto_id_raw is None or not arquivo:
+        return jsonify({"ok": False, "error": "produtoId e foto sao obrigatorios."}), 400
+    if arquivo.mimetype not in FOTO_MIMETYPES_PERMITIDOS or not _assinatura_de_imagem_ok(arquivo.stream):
+        return jsonify({"ok": False, "error": "Tipo de arquivo nao permitido. Envie uma imagem JPEG ou PNG."}), 400
+    try:
+        produto_id = int(produto_id_raw)
+    except ValueError:
+        return jsonify({"ok": False, "error": "produtoId deve ser um numero."}), 400
+
+    pasta_filial = os.path.join(FOTOS_DIR, str(filial_id))
+    os.makedirs(pasta_filial, exist_ok=True)
+    caminho = os.path.join(pasta_filial, f"{produto_id}.jpg")
+    arquivo.save(caminho)
+
+    with _fotos_lock:
+        fotos = _load_fotos()
+        fotos.setdefault(str(filial_id), {})[str(produto_id)] = {
+            "arquivo": f"{filial_id}/{produto_id}.jpg",
+            "fotografadoPor": fotografo_email,
+            "fotografadoEm": datetime.now().isoformat(),
+        }
+        _save_fotos(fotos)
+
+    return jsonify({"ok": True, "arquivo": f"{filial_id}/{produto_id}.jpg"})
+
+
+@app.route("/api/fotos/<int:filial_id>/<int:produto_id>.jpg")
+def servir_foto(filial_id, produto_id):
+    caminho = os.path.join(FOTOS_DIR, str(filial_id), f"{produto_id}.jpg")
+    if not os.path.isfile(caminho):
+        return jsonify({"ok": False, "error": "Foto nao encontrada."}), 404
+    return send_file(caminho, mimetype="image/jpeg")
+
+
+@app.route("/api/fotografo/fotos")
+def fotografo_listar_fotos():
+    filial_id, erro = _filial_autorizada()
+    if erro:
+        return erro
+
+    fotos_filial = _load_fotos().get(str(filial_id), {})
+    resultado = [
+        {
+            "produtoId": int(pid),
+            "url": f"/api/fotos/{filial_id}/{pid}.jpg",
+            "fotografadoEm": info.get("fotografadoEm"),
+        }
+        for pid, info in fotos_filial.items()
+    ]
+    return jsonify({"ok": True, "fotos": resultado})
+
+
+@app.route("/api/admin/fotos/zip", methods=["POST"])
+def admin_zip_fotos():
+    data = request.get_json(silent=True) or {}
+    if not _admin_password_ok(data.get("adminPassword")):
+        return jsonify({"ok": False, "error": "Senha de administrador incorreta."}), 403
+    filial_id_param = data.get("filialId")
+    if filial_id_param is None:
+        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
+    try:
+        filial_id = int(filial_id_param)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400
+
+    fotos_filial = _load_fotos().get(str(filial_id), {})
+    if not fotos_filial:
+        return jsonify({"ok": False, "error": "Nenhuma foto encontrada para esta loja."}), 404
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for produto_id in fotos_filial:
+            caminho = os.path.join(FOTOS_DIR, str(filial_id), f"{produto_id}.jpg")
+            if os.path.isfile(caminho):
+                zf.write(caminho, arcname=f"{produto_id}.jpg")
+    buffer.seek(0)
+    return send_file(buffer, mimetype="application/zip", as_attachment=True,
+                      download_name=f"fotos_filial_{filial_id}.zip")
+
+
 FASE2_FILE = os.path.join(DATA_DIR, "fase2_liberada.json")
 
 
@@ -752,6 +1000,7 @@ def admin_create_bipador():
     email = (data.get("email") or "").strip().lower()
     filial_id = data.get("filialId")
     password = data.get("password")
+    role = data.get("role") if data.get("role") in ("bipador", "fotografo") else "bipador"
     if not name or not email or filial_id is None or not isinstance(password, str) or not password:
         return jsonify({"ok": False, "error": "Nome, email, senha e loja são obrigatórios."}), 400
     if len(password) < 6:
@@ -761,7 +1010,7 @@ def admin_create_bipador():
         if email in users:
             return jsonify({"ok": False, "error": "Email já cadastrado."}), 409
         users[email] = {
-            "name": name, "email": email, "filialId": filial_id,
+            "name": name, "email": email, "filialId": filial_id, "role": role,
             "password_hash": generate_password_hash(password),
         }
         _save_users(users)
@@ -970,6 +1219,7 @@ def login():
         return jsonify({"ok": False, "error": "Email ou senha incorretos."}), 401
     _bipador_login_attempts.pop(ip, None)
     user_public = {k: v for k, v in user.items() if k != "password_hash"}
+    user_public["token"] = _user_token(user)
     return jsonify({"ok": True, "user": user_public})
 
 
