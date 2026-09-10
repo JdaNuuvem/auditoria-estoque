@@ -494,12 +494,23 @@ function toast(msg, type) {
 }
 
 /* ===== API ===== */
-async function apiGet(path, params = {}) {
+async function apiGet(path, params = {}, opts = {}) {
   const qs = new URLSearchParams(params).toString();
   const url = '/api/' + path + (qs ? '?' + qs : '');
-  const resp = await fetch(url);
+  const resp = await fetch(url, { headers: opts.admin ? adminHeaders() : authHeaders() });
   if (!resp.ok) throw new Error('API error ' + resp.status);
   return resp.json();
+}
+
+// Identidade vai por header, nunca por querystring/corpo: o servidor deriva
+// loja e autor do cadastro do usuario a partir do token.
+function authHeaders() {
+  if (!S.user || !S.user.token) return {};
+  return { 'X-Auth-Email': S.user.email, 'X-Auth-Token': S.user.token };
+}
+
+function adminHeaders() {
+  return S.adminPassword ? { 'X-Admin-Password': S.adminPassword } : {};
 }
 
 async function apiAuth(endpoint, body) {
@@ -2223,7 +2234,7 @@ async function loadBipadoresList() {
 
 async function carregarProgressoFotosPorLoja() {
   const linhas = await Promise.all(S.filiais.map(async f => {
-    const r = await apiGet('fotografo/fila', { filialId: f.id, resumo: 1 });
+    const r = await apiGet('fotografo/fila', { filialId: f.id, resumo: 1 }, { admin: true });
     return { filial: f, totalBipado: r.total_bipado || 0, totalFotografado: r.total_fotografado || 0 };
   }));
   $('#fotos-progresso-list').innerHTML = linhas.map(l => {
@@ -2247,7 +2258,7 @@ async function carregarProgressoFotosPorLoja() {
 async function abrirGaleriaAdmin(filialId) {
   const filial = S.filiais.find(f => f.id === filialId);
   $('#foto-galeria-admin-titulo').textContent = 'Fotos — ' + (filial ? (filial.fantasia || filial.razaosocial) : filialId);
-  const r = await apiGet('fotografo/fotos', { filialId });
+  const r = await apiGet('fotografo/fotos', { filialId }, { admin: true });
   const fotos = r.fotos || [];
   $('#foto-galeria-admin-lista').innerHTML = fotos.length
     ? fotos.map(f => `<a href="${f.url}" target="_blank" rel="noopener noreferrer"><img src="${f.url}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px"></a>`).join('')
@@ -2345,7 +2356,7 @@ async function handleUpdateBipadorFilial(email, filialId) {
 function onAuthSuccess(user) {
   const filial = S.filiais.find(f => f.id === user.filialId);
   S.user = { ...user, filialNome: filial ? (filial.fantasia || filial.razaosocial) : 'Loja ' + user.filialId };
-  lsSet(LS_KEYS.state, { email: user.email, name: user.name, filialId: user.filialId, role: user.role });
+  lsSet(LS_KEYS.state, { email: user.email, name: user.name, filialId: user.filialId, role: user.role, token: user.token });
   if (S.user.role === 'fotografo') startFotografoInternal();
   else startAuditInternal();
 }
@@ -2363,7 +2374,7 @@ async function startFotografoInternal() {
 }
 
 async function loadFotografoFila() {
-  const r = await apiGet('fotografo/fila', { filialId: S.user.filialId });
+  const r = await apiGet('fotografo/fila');
   S.fotografoFila = r.fila || [];
   S.totalBipado = r.total_bipado || 0;
   S.totalFotografado = r.total_fotografado || 0;
@@ -2446,12 +2457,10 @@ async function enviarFotoAtual() {
   const produto = S.fotografoEmRevisao || S.fotografoAtual;
   if (!S.fotoBlobAtual || !produto) return;
   const form = new FormData();
-  form.append('filialId', S.user.filialId);
   form.append('produtoId', produto.id);
-  form.append('fotografoEmail', S.user.email);
   form.append('foto', S.fotoBlobAtual, 'foto.jpg');
   try {
-    const resp = await fetch('/api/fotografo/foto', { method: 'POST', body: form });
+    const resp = await fetch('/api/fotografo/foto', { method: 'POST', headers: authHeaders(), body: form });
     const r = await resp.json();
     if (!r.ok) { toast('Erro ao enviar foto: ' + r.error, 'err'); return; }
     toast('Foto enviada!', 'ok');
@@ -2471,7 +2480,7 @@ async function enviarFotoAtual() {
 }
 
 async function abrirJaFotografados() {
-  const r = await apiGet('fotografo/fotos', { filialId: S.user.filialId });
+  const r = await apiGet('fotografo/fotos');
   const fotos = r.fotos || [];
   $('#foto-revisar-lista').innerHTML = fotos.length
     ? fotos.map(f => `
@@ -2562,7 +2571,7 @@ async function pularParaProdutoAvulso(codigo) {
   }
   // Nao esta na fila (sem foto) - checa se ja foi fotografado, pra permitir refotografar.
   try {
-    const r = await apiGet('fotografo/fotos', { filialId: S.user.filialId });
+    const r = await apiGet('fotografo/fotos');
     const fotos = r.fotos || [];
     if (fotos.some(f => f.produtoId === produtoId)) {
       reFotografarProduto(produtoId);
@@ -2574,8 +2583,11 @@ async function pularParaProdutoAvulso(codigo) {
 
 function autoLoginIfSessionSaved() {
   const prevState = lsGet(LS_KEYS.state);
+  // Sessao gravada antes do token de autenticacao existir: nao da pra chamar
+  // as APIs sem ele, entao pede login de novo em vez de falhar em 401.
+  if (prevState && prevState.email && !prevState.token) { lsSet(LS_KEYS.state, null); return; }
   if (prevState && prevState.email) {
-    S.user = { name: prevState.name, email: prevState.email, filialId: prevState.filialId, role: prevState.role, filialNome: '' };
+    S.user = { name: prevState.name, email: prevState.email, filialId: prevState.filialId, role: prevState.role, token: prevState.token, filialNome: '' };
     const filial = S.filiais.find(f => f.id === prevState.filialId);
     if (filial) S.user.filialNome = filial.fantasia || filial.razaocial;
     if (S.user.role === 'fotografo') startFotografoInternal();

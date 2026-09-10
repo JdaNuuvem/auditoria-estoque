@@ -33,6 +33,24 @@ def _admin():
     return {"adminPassword": "segredo123"}
 
 
+def _admin_h():
+    return {"X-Admin-Password": "segredo123"}
+
+
+JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+
+
+def _cria_usuario(client, email="foto1@x.com", filial_id=1, role="fotografo"):
+    """Cria o usuario e devolve os headers de autenticacao dele."""
+    client.post("/api/admin/bipadores", json={
+        **_admin(), "name": email, "email": email,
+        "password": "senha123", "filialId": filial_id, "role": role,
+    })
+    r = client.post("/api/auth/login", json={"email": email, "password": "senha123"})
+    token = r.get_json()["user"]["token"]
+    return {"X-Auth-Email": email, "X-Auth-Token": token}
+
+
 def test_criar_usuario_com_role_fotografo(client):
     resp = client.post("/api/admin/bipadores", json={
         **_admin(), "name": "Foto1", "email": "foto1@x.com",
@@ -75,7 +93,7 @@ def test_fila_fotografo_traz_bipados_na_ordem_sem_foto(client):
         {"id": 10, "descricao": "Produto A", "ean": "111", "codproduto": "A1"},
         {"id": 20, "descricao": "Produto B", "ean": "222", "codproduto": "B1"},
     ]
-    server._save_users({"a@a.com": {"name": "A", "filialId": 1, "role": "bipador"}})
+    headers = _cria_usuario(client, "a@a.com", 1, "bipador")
     r = client.post("/api/audit/session/start", json={
         "filialId": 1, "filialNome": "Loja", "userEmail": "a@a.com", "userName": "A",
     })
@@ -83,7 +101,7 @@ def test_fila_fotografo_traz_bipados_na_ordem_sem_foto(client):
     _bipar(client, sid, 10, "111", "Produto A")
     _bipar(client, sid, 20, "222", "Produto B")
 
-    resp = client.get("/api/fotografo/fila?filialId=1")
+    resp = client.get("/api/fotografo/fila", headers=headers)
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["ok"] is True
@@ -93,13 +111,18 @@ def test_fila_fotografo_traz_bipados_na_ordem_sem_foto(client):
     server.CACHE["produtos"] = []
 
 
-def test_fila_fotografo_sem_filial_id_retorna_400(client):
+def test_fila_fotografo_sem_autenticacao_retorna_401(client):
     resp = client.get("/api/fotografo/fila")
+    assert resp.status_code == 401
+
+
+def test_fila_fotografo_admin_sem_filial_id_retorna_400(client):
+    resp = client.get("/api/fotografo/fila", headers=_admin_h())
     assert resp.status_code == 400
 
 
 def test_fila_fotografo_loja_sem_bipagem_retorna_vazia(client):
-    resp = client.get("/api/fotografo/fila?filialId=999")
+    resp = client.get("/api/fotografo/fila?filialId=999", headers=_admin_h())
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["fila"] == []
@@ -107,11 +130,11 @@ def test_fila_fotografo_loja_sem_bipagem_retorna_vazia(client):
 
 
 def test_upload_foto_grava_arquivo_e_atualiza_registro(client):
-    foto_bytes = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+    headers = _cria_usuario(client)
+    foto_bytes = JPEG
     resp = client.post("/api/fotografo/foto", data={
-        "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
-        "foto": (io.BytesIO(foto_bytes), "foto.jpg"),
-    }, content_type="multipart/form-data")
+        "produtoId": "10", "foto": (io.BytesIO(foto_bytes), "foto.jpg"),
+    }, content_type="multipart/form-data", headers=headers)
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["ok"] is True
@@ -129,36 +152,96 @@ def test_upload_foto_grava_arquivo_e_atualiza_registro(client):
 
 
 def test_upload_foto_sobrescreve_arquivo_existente(client):
+    headers = _cria_usuario(client)
+
     def _envia(conteudo):
         return client.post("/api/fotografo/foto", data={
-            "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
-            "foto": (io.BytesIO(conteudo), "foto.jpg"),
-        }, content_type="multipart/form-data")
+            "produtoId": "10", "foto": (io.BytesIO(conteudo), "foto.jpg"),
+        }, content_type="multipart/form-data", headers=headers)
 
-    _envia(b"primeira-versao")
-    _envia(b"segunda-versao")
+    _envia(JPEG + b"primeira")
+    _envia(JPEG + b"segunda")
 
     caminho = os.path.join(server.FOTOS_DIR, "1", "10.jpg")
     with open(caminho, "rb") as f:
-        assert f.read() == b"segunda-versao"
+        assert f.read() == JPEG + b"segunda"
     fotos = server._load_fotos()
     assert len(fotos["1"]) == 1
 
 
 def test_upload_foto_sem_campos_obrigatorios_retorna_400(client):
-    resp = client.post("/api/fotografo/foto", data={"filialId": "1"}, content_type="multipart/form-data")
+    headers = _cria_usuario(client)
+    resp = client.post("/api/fotografo/foto", data={"produtoId": "10"},
+                       content_type="multipart/form-data", headers=headers)
     assert resp.status_code == 400
 
 
-def test_servir_foto_retorna_arquivo(client):
-    client.post("/api/fotografo/foto", data={
-        "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
-        "foto": (io.BytesIO(b"conteudo-da-foto"), "foto.jpg"),
+def test_upload_foto_sem_autenticacao_retorna_401(client):
+    resp = client.post("/api/fotografo/foto", data={
+        "produtoId": "10", "foto": (io.BytesIO(JPEG), "foto.jpg"),
     }, content_type="multipart/form-data")
+    assert resp.status_code == 401
+    assert not os.path.exists(os.path.join(server.FOTOS_DIR, "1", "10.jpg"))
+
+
+def test_upload_foto_token_invalido_retorna_401(client):
+    _cria_usuario(client)
+    resp = client.post("/api/fotografo/foto", data={
+        "produtoId": "10", "foto": (io.BytesIO(JPEG), "foto.jpg"),
+    }, content_type="multipart/form-data",
+        headers={"X-Auth-Email": "foto1@x.com", "X-Auth-Token": "token-falso"})
+    assert resp.status_code == 401
+
+
+def test_upload_foto_ignora_filial_e_email_do_formulario(client):
+    """filialId/fotografoEmail do corpo nao podem sobrepor o cadastro - senao
+    um fotografo da loja 1 grava foto na loja 2 assinando com outro email."""
+    headers = _cria_usuario(client, "foto1@x.com", filial_id=1)
+    resp = client.post("/api/fotografo/foto", data={
+        "filialId": "2", "produtoId": "10", "fotografoEmail": "chefe@x.com",
+        "foto": (io.BytesIO(JPEG), "foto.jpg"),
+    }, content_type="multipart/form-data", headers=headers)
+    assert resp.status_code == 200
+    assert resp.get_json()["arquivo"] == "1/10.jpg"
+    fotos = server._load_fotos()
+    assert "2" not in fotos
+    assert fotos["1"]["10"]["fotografadoPor"] == "foto1@x.com"
+
+
+def test_upload_rejeita_arquivo_que_nao_e_imagem_de_verdade(client):
+    """mimetype vem do cliente e mente: conteudo executavel declarado como
+    image/jpeg tem que ser recusado pelos magic bytes."""
+    headers = _cria_usuario(client)
+    resp = client.post("/api/fotografo/foto", data={
+        "produtoId": "10",
+        "foto": (io.BytesIO(b"MZ conteudo executavel"), "foto.jpg", "image/jpeg"),
+    }, content_type="multipart/form-data", headers=headers)
+    assert resp.status_code == 400
+    assert not os.path.exists(os.path.join(server.FOTOS_DIR, "1", "10.jpg"))
+
+
+def test_fotos_de_outra_loja_nao_vazam_pra_usuario_comum(client):
+    """Usuario da loja 2 nao ve as fotos da loja 1, mesmo pedindo filialId=1."""
+    h1 = _cria_usuario(client, "foto1@x.com", filial_id=1)
+    client.post("/api/fotografo/foto", data={
+        "produtoId": "10", "foto": (io.BytesIO(JPEG), "foto.jpg"),
+    }, content_type="multipart/form-data", headers=h1)
+
+    h2 = _cria_usuario(client, "foto2@x.com", filial_id=2)
+    resp = client.get("/api/fotografo/fotos?filialId=1", headers=h2)
+    assert resp.status_code == 200
+    assert resp.get_json()["fotos"] == []
+
+
+def test_servir_foto_retorna_arquivo(client):
+    headers = _cria_usuario(client)
+    client.post("/api/fotografo/foto", data={
+        "produtoId": "10", "foto": (io.BytesIO(JPEG), "foto.jpg"),
+    }, content_type="multipart/form-data", headers=headers)
 
     resp = client.get("/api/fotos/1/10.jpg")
     assert resp.status_code == 200
-    assert resp.data == b"conteudo-da-foto"
+    assert resp.data == JPEG
 
 
 def test_servir_foto_inexistente_retorna_404(client):
@@ -167,16 +250,15 @@ def test_servir_foto_inexistente_retorna_404(client):
 
 
 def test_listar_fotos_da_loja(client):
+    headers = _cria_usuario(client)
     client.post("/api/fotografo/foto", data={
-        "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
-        "foto": (io.BytesIO(b"a"), "a.jpg"),
-    }, content_type="multipart/form-data")
+        "produtoId": "10", "foto": (io.BytesIO(JPEG + b"a"), "a.jpg"),
+    }, content_type="multipart/form-data", headers=headers)
     client.post("/api/fotografo/foto", data={
-        "filialId": "1", "produtoId": "20", "fotografoEmail": "foto1@x.com",
-        "foto": (io.BytesIO(b"b"), "b.jpg"),
-    }, content_type="multipart/form-data")
+        "produtoId": "20", "foto": (io.BytesIO(JPEG + b"b"), "b.jpg"),
+    }, content_type="multipart/form-data", headers=headers)
 
-    resp = client.get("/api/fotografo/fotos?filialId=1")
+    resp = client.get("/api/fotografo/fotos", headers=headers)
     assert resp.status_code == 200
     body = resp.get_json()
     assert len(body["fotos"]) == 2
@@ -185,20 +267,19 @@ def test_listar_fotos_da_loja(client):
     assert body["fotos"][0]["url"].startswith("/api/fotos/1/")
 
 
-def test_listar_fotos_sem_filial_id_retorna_400(client):
+def test_listar_fotos_sem_autenticacao_retorna_401(client):
     resp = client.get("/api/fotografo/fotos")
-    assert resp.status_code == 400
+    assert resp.status_code == 401
 
 
 def test_zip_fotos_da_loja(client):
+    headers = _cria_usuario(client)
     client.post("/api/fotografo/foto", data={
-        "filialId": "1", "produtoId": "10", "fotografoEmail": "foto1@x.com",
-        "foto": (io.BytesIO(b"conteudo-a"), "a.jpg"),
-    }, content_type="multipart/form-data")
+        "produtoId": "10", "foto": (io.BytesIO(JPEG + b"conteudo-a"), "a.jpg"),
+    }, content_type="multipart/form-data", headers=headers)
     client.post("/api/fotografo/foto", data={
-        "filialId": "1", "produtoId": "20", "fotografoEmail": "foto1@x.com",
-        "foto": (io.BytesIO(b"conteudo-b"), "b.jpg"),
-    }, content_type="multipart/form-data")
+        "produtoId": "20", "foto": (io.BytesIO(JPEG + b"conteudo-b"), "b.jpg"),
+    }, content_type="multipart/form-data", headers=headers)
 
     resp = client.post("/api/admin/fotos/zip", json={**_admin(), "filialId": 1})
     assert resp.status_code == 200
@@ -208,7 +289,7 @@ def test_zip_fotos_da_loja(client):
     with zipfile.ZipFile(zip_bytes) as zf:
         nomes = set(zf.namelist())
         assert nomes == {"10.jpg", "20.jpg"}
-        assert zf.read("10.jpg") == b"conteudo-a"
+        assert zf.read("10.jpg") == JPEG + b"conteudo-a"
 
 
 def test_zip_fotos_senha_errada_retorna_403(client):

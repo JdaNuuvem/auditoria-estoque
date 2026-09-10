@@ -1,5 +1,6 @@
 import collections
 import gzip
+import hashlib
 import hmac
 import io
 import json
@@ -25,6 +26,15 @@ CORS(app)
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8MB - limite de upload (fotos de produto)
 
 FOTO_MIMETYPES_PERMITIDOS = {"image/jpeg", "image/png"}
+FOTO_ASSINATURAS = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")
+
+
+def _assinatura_de_imagem_ok(stream):
+    """O mimetype do upload vem do cliente e mente. Confere os magic bytes do
+    conteudo antes de gravar, e devolve o stream pro inicio pro save()."""
+    cabecalho = stream.read(8)
+    stream.seek(0)
+    return any(cabecalho.startswith(a) for a in FOTO_ASSINATURAS)
 
 
 @app.after_request
@@ -59,6 +69,36 @@ if len(ADMIN_PASSWORD) < 8:
 
 def _admin_password_ok(candidate):
     return hmac.compare_digest(str(candidate or "").encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
+
+
+def _admin_header_ok():
+    """Admin autenticado por header (X-Admin-Password) em vez de query string -
+    querystring vaza em log de acesso e no Referer."""
+    return _admin_password_ok(request.headers.get("X-Admin-Password"))
+
+
+def _user_token(user):
+    """Token derivado do email + hash da senha, assinado com a chave do servidor.
+    Trocar/redefinir a senha invalida os tokens antigos automaticamente, e o
+    token nao carrega segredo nenhum que sirva pra outra coisa."""
+    msg = f"{user.get('email', '')}|{user.get('password_hash', '')}".encode("utf-8")
+    return hmac.new(ADMIN_PASSWORD.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+
+def _usuario_autenticado(roles=None):
+    """Usuario provado pelos headers X-Auth-Email/X-Auth-Token, ou None.
+    Nunca confie em filialId/email vindos do corpo da requisicao - eles saem
+    daqui, do registro do usuario."""
+    email = (request.headers.get("X-Auth-Email") or "").strip().lower()
+    token = request.headers.get("X-Auth-Token") or ""
+    user = _load_users().get(email)
+    if not user or not user.get("password_hash"):
+        return None
+    if not hmac.compare_digest(token, _user_token(user)):
+        return None
+    if roles is not None and user.get("role") not in roles:
+        return None
+    return user
 
 
 # Chave separada da senha de admin - uso machine-to-machine (outro app
@@ -481,15 +521,33 @@ def _total_bipados(filial_id):
     return total
 
 
+def _filial_autorizada():
+    """Resolve a loja que o chamador pode ver. Admin (header) escolhe qualquer
+    uma via ?filialId; usuario comum fica preso a loja do proprio cadastro.
+    Retorna (filial_id, None) ou (None, resposta_de_erro)."""
+    if _admin_header_ok():
+        filial_id_param = request.args.get("filialId")
+        if filial_id_param is None:
+            return None, (jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400)
+        try:
+            return int(filial_id_param), None
+        except ValueError:
+            return None, (jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400)
+
+    user = _usuario_autenticado(("fotografo", "bipador"))
+    if not user:
+        return None, (jsonify({"ok": False, "error": "Nao autorizado."}), 401)
+    try:
+        return int(user.get("filialId")), None
+    except (TypeError, ValueError):
+        return None, (jsonify({"ok": False, "error": "Usuario sem loja valida."}), 403)
+
+
 @app.route("/api/fotografo/fila")
 def fotografo_fila():
-    filial_id_param = request.args.get("filialId")
-    if filial_id_param is None:
-        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
-    try:
-        filial_id = int(filial_id_param)
-    except ValueError:
-        return jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400
+    filial_id, erro = _filial_autorizada()
+    if erro:
+        return erro
 
     fotos = _load_fotos().get(str(filial_id), {})
 
@@ -509,19 +567,27 @@ def fotografo_fila():
 
 @app.route("/api/fotografo/foto", methods=["POST"])
 def fotografo_upload_foto():
-    filial_id_raw = request.form.get("filialId")
+    user = _usuario_autenticado(("fotografo", "bipador"))
+    if not user:
+        return jsonify({"ok": False, "error": "Nao autorizado."}), 401
+    # Loja e autor saem do cadastro do usuario, nunca do formulario - senao
+    # qualquer um grava foto em qualquer loja e assina com o email que quiser.
+    fotografo_email = user["email"]
+    try:
+        filial_id = int(user.get("filialId"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Usuario sem loja valida."}), 403
+
     produto_id_raw = request.form.get("produtoId")
-    fotografo_email = (request.form.get("fotografoEmail") or "").strip().lower()
     arquivo = request.files.get("foto")
-    if filial_id_raw is None or produto_id_raw is None or not arquivo:
-        return jsonify({"ok": False, "error": "filialId, produtoId e foto sao obrigatorios."}), 400
-    if arquivo.mimetype not in FOTO_MIMETYPES_PERMITIDOS:
+    if produto_id_raw is None or not arquivo:
+        return jsonify({"ok": False, "error": "produtoId e foto sao obrigatorios."}), 400
+    if arquivo.mimetype not in FOTO_MIMETYPES_PERMITIDOS or not _assinatura_de_imagem_ok(arquivo.stream):
         return jsonify({"ok": False, "error": "Tipo de arquivo nao permitido. Envie uma imagem JPEG ou PNG."}), 400
     try:
-        filial_id = int(filial_id_raw)
         produto_id = int(produto_id_raw)
     except ValueError:
-        return jsonify({"ok": False, "error": "filialId e produtoId devem ser numeros."}), 400
+        return jsonify({"ok": False, "error": "produtoId deve ser um numero."}), 400
 
     pasta_filial = os.path.join(FOTOS_DIR, str(filial_id))
     os.makedirs(pasta_filial, exist_ok=True)
@@ -550,13 +616,9 @@ def servir_foto(filial_id, produto_id):
 
 @app.route("/api/fotografo/fotos")
 def fotografo_listar_fotos():
-    filial_id_param = request.args.get("filialId")
-    if filial_id_param is None:
-        return jsonify({"ok": False, "error": "filialId e obrigatorio."}), 400
-    try:
-        filial_id = int(filial_id_param)
-    except ValueError:
-        return jsonify({"ok": False, "error": "filialId deve ser um numero."}), 400
+    filial_id, erro = _filial_autorizada()
+    if erro:
+        return erro
 
     fotos_filial = _load_fotos().get(str(filial_id), {})
     resultado = [
@@ -1157,6 +1219,7 @@ def login():
         return jsonify({"ok": False, "error": "Email ou senha incorretos."}), 401
     _bipador_login_attempts.pop(ip, None)
     user_public = {k: v for k, v in user.items() if k != "password_hash"}
+    user_public["token"] = _user_token(user)
     return jsonify({"ok": True, "user": user_public})
 
 
