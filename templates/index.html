@@ -275,11 +275,14 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
           <button class="btn-o" id="btn-pular-produto">Pular</button>
           <button class="btn-o" id="btn-ler-codigo-avulso">Ler Código de Barras</button>
         </div>
+        <!-- Fallback: em HTTP (sem contexto seguro) e em navegadores sem
+             getUserMedia, a camera nativa do celular ainda funciona por aqui. -->
+        <input id="foto-input-nativo" type="file" accept="image/*" capture="environment" style="display:none">
       </div>
     </div>
 
     <div id="foto-camera-modal">
-      <video id="foto-camera-video" autoplay playsinline></video>
+      <video id="foto-camera-video" autoplay playsinline muted></video>
       <canvas id="foto-canvas" style="display:none"></canvas>
       <img id="foto-preview-img" style="display:none">
       <button class="close-btn" id="btn-fechar-foto-camera">×</button>
@@ -303,7 +306,7 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
     </div>
 
     <div id="foto-scanner-modal" style="position:fixed;inset:0;background:#000;z-index:300;display:none;flex-direction:column">
-      <video id="foto-scanner-video" autoplay playsinline style="flex:1;width:100%;object-fit:cover"></video>
+      <video id="foto-scanner-video" autoplay playsinline muted style="flex:1;width:100%;object-fit:cover"></video>
       <button class="close-btn" id="btn-fechar-foto-scanner" style="position:absolute;top:16px;right:16px;background:rgba(255,255,255,.2);color:#fff;border-radius:50%;width:44px;height:44px;font-size:1.5rem;display:flex;align-items:center;justify-content:center">×</button>
     </div>
     <!-- REPORTS -->
@@ -469,6 +472,8 @@ let S = {
   fotografoEmRevisao: null,
   fotoStream: null,
   fotoBlobAtual: null,
+  fotoPreviewUrl: null,
+  enviandoFoto: false,
 };
 
 /* ===== UTILITY ===== */
@@ -2404,21 +2409,85 @@ function renderFotografoAtual() {
     <div style="color:var(--muted);font-size:.85rem;margin-top:4px">SKU: ${escapeHtml(p.codproduto || '-')} | EAN: ${escapeHtml(p.ean || '-')}</div>`;
 }
 
+// getUserMedia so existe em contexto seguro (HTTPS ou localhost). Em HTTP,
+// iOS Safari e Chrome Android deixam navigator.mediaDevices indefinido.
+function cameraAoVivoDisponivel() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+
 async function startFotoCamera() {
+  if (!cameraAoVivoDisponivel()) { abrirCameraNativa(); return; }
   try {
     S.fotoStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1280 } },
       audio: false,
     });
-    $('#foto-camera-video').srcObject = S.fotoStream;
-    $('#foto-camera-video').style.display = 'block';
+    const video = $('#foto-camera-video');
+    video.srcObject = S.fotoStream;
+    video.style.display = 'block';
     $('#foto-preview-img').style.display = 'none';
     $('#foto-cam-controls-video').style.display = 'flex';
     $('#foto-cam-controls-preview').style.display = 'none';
     $('#foto-camera-modal').classList.add('active');
+    // Safari nao inicia o video sozinho em todos os casos.
+    try { await video.play(); } catch (e) {}
   } catch (e) {
-    toast('Erro ao acessar câmera: ' + e.message, 'err');
+    if (e && (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError')) {
+      toast('Permissão de câmera negada. Libere nas configurações do navegador.', 'err');
+      return;
+    }
+    // Camera ao vivo indisponivel por outro motivo - cai pra camera nativa.
+    abrirCameraNativa();
   }
+}
+
+// Abre o app de camera do proprio celular. Funciona em iOS e Android mesmo
+// sem HTTPS, e e o caminho de saida quando a camera ao vivo falha.
+function abrirCameraNativa() {
+  const input = $('#foto-input-nativo');
+  input.value = '';
+  input.click();
+}
+
+async function onFotoNativaEscolhida(evento) {
+  const arquivo = evento.target.files && evento.target.files[0];
+  if (!arquivo) return;
+  if (!/^image\/(jpeg|png)$/.test(arquivo.type)) {
+    toast('Envie uma foto JPEG ou PNG.', 'err');
+    return;
+  }
+  S.fotoBlobAtual = await reduzImagem(arquivo);
+  if (S.fotoPreviewUrl) URL.revokeObjectURL(S.fotoPreviewUrl);
+  S.fotoPreviewUrl = URL.createObjectURL(S.fotoBlobAtual);
+  $('#foto-preview-img').src = S.fotoPreviewUrl;
+  $('#foto-camera-video').style.display = 'none';
+  $('#foto-preview-img').style.display = 'block';
+  $('#foto-cam-controls-video').style.display = 'none';
+  $('#foto-cam-controls-preview').style.display = 'flex';
+  $('#foto-camera-modal').classList.add('active');
+}
+
+// Foto de celular vem com 3-8MB e estoura o limite de upload do servidor.
+// Reduz pro mesmo tamanho da captura ao vivo antes de enviar.
+function reduzImagem(arquivo) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(arquivo);
+    img.onload = () => {
+      const maxLado = 1600;
+      const escala = Math.min(1, maxLado / Math.max(img.width, img.height));
+      const canvas = $('#foto-canvas');
+      canvas.width = img.width * escala;
+      canvas.height = img.height * escala;
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => {
+        URL.revokeObjectURL(url);
+        resolve(blob || arquivo);
+      }, 'image/jpeg', 0.85);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(arquivo); };
+    img.src = url;
+  });
 }
 
 function stopFotoCamera() {
@@ -2428,10 +2497,20 @@ function stopFotoCamera() {
   }
   $('#foto-camera-modal').classList.remove('active');
   S.fotoBlobAtual = null;
+  if (S.fotoPreviewUrl) { URL.revokeObjectURL(S.fotoPreviewUrl); S.fotoPreviewUrl = null; }
+  // Fechar a camera cancela a revisao pendente. Sem isso, a proxima foto
+  // tirada da fila era gravada por cima do produto que ficou em revisao.
+  S.fotografoEmRevisao = null;
 }
 
 function capturarFoto() {
   const video = $('#foto-camera-video');
+  // No iOS a camera demora a entregar o primeiro quadro; capturar antes disso
+  // gera um canvas 0x0 e uma foto vazia.
+  if (!video.videoWidth || !video.videoHeight) {
+    toast('Camera ainda carregando, tente de novo em 1 segundo.', 'warn');
+    return;
+  }
   const canvas = $('#foto-canvas');
   const maxLado = 1600;
   const escala = Math.min(1, maxLado / Math.max(video.videoWidth, video.videoHeight));
@@ -2439,8 +2518,14 @@ function capturarFoto() {
   canvas.height = video.videoHeight * escala;
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   canvas.toBlob((blob) => {
+    if (!blob) {
+      toast('Nao foi possivel gerar a foto. Tente novamente.', 'err');
+      return;
+    }
     S.fotoBlobAtual = blob;
-    $('#foto-preview-img').src = URL.createObjectURL(blob);
+    if (S.fotoPreviewUrl) URL.revokeObjectURL(S.fotoPreviewUrl);
+    S.fotoPreviewUrl = URL.createObjectURL(blob);
+    $('#foto-preview-img').src = S.fotoPreviewUrl;
     $('#foto-camera-video').style.display = 'none';
     $('#foto-preview-img').style.display = 'block';
     $('#foto-cam-controls-video').style.display = 'none';
@@ -2450,6 +2535,10 @@ function capturarFoto() {
 
 function repetirFoto() {
   S.fotoBlobAtual = null;
+  if (S.fotoPreviewUrl) { URL.revokeObjectURL(S.fotoPreviewUrl); S.fotoPreviewUrl = null; }
+  // Foto veio da camera nativa (nao ha stream ao vivo): repetir tem que abrir
+  // a camera do celular de novo, senao o video fica preto.
+  if (!S.fotoStream) { abrirCameraNativa(); return; }
   $('#foto-camera-video').style.display = 'block';
   $('#foto-preview-img').style.display = 'none';
   $('#foto-cam-controls-video').style.display = 'flex';
@@ -2457,21 +2546,37 @@ function repetirFoto() {
 }
 
 async function enviarFotoAtual() {
-  const produto = S.fotografoEmRevisao || S.fotografoAtual;
-  if (!S.fotoBlobAtual || !produto) return;
+  // Guarda o alvo antes de qualquer await: stopFotoCamera() zera a revisao.
+  const emRevisao = S.fotografoEmRevisao;
+  const produto = emRevisao || S.fotografoAtual;
+  if (!S.fotoBlobAtual || !produto || S.enviandoFoto) return;
+
+  // Rede de loja e lenta: sem travar o botao, cada toque extra vira um upload
+  // novo e o contador de fotografados sobe mais de uma vez pela mesma foto.
+  S.enviandoFoto = true;
+  const btn = $('#btn-enviar-foto');
+  const textoOriginal = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Enviando...';
+
   const form = new FormData();
   form.append('produtoId', produto.id);
   form.append('foto', S.fotoBlobAtual, 'foto.jpg');
   try {
     const resp = await fetch('/api/fotografo/foto', { method: 'POST', headers: authHeaders(), body: form });
-    const r = await resp.json();
-    if (!r.ok) { toast('Erro ao enviar foto: ' + r.error, 'err'); return; }
-    toast('Foto enviada!', 'ok');
+    if (resp.status === 413) { toast('Foto grande demais para o servidor. Tente novamente.', 'err'); return; }
+    if (resp.status === 401) { toast('Sessão expirada. Entre de novo.', 'err'); return; }
+    // Erro de servidor responde HTML, nao JSON - sem isso o json() estoura e a
+    // mensagem que aparecia era "sem conexao", culpando a rede sem motivo.
+    let r;
+    try { r = await resp.json(); } catch { r = null; }
+    if (!r || !r.ok) { toast('Erro ao enviar foto: ' + ((r && r.error) || ('HTTP ' + resp.status)), 'err'); return; }
+
     stopFotoCamera();
-    if (S.fotografoEmRevisao) {
-      S.fotografoEmRevisao = null;
+    if (emRevisao) {
       toast('Foto atualizada!', 'ok');
     } else {
+      toast('Foto enviada!', 'ok');
       S.fotografoFila = S.fotografoFila.filter(p => p.id !== produto.id);
       S.totalFotografado += 1;
       S.fotografoAtual = S.fotografoFila[0] || null;
@@ -2479,6 +2584,10 @@ async function enviarFotoAtual() {
     }
   } catch (e) {
     toast('Falha ao enviar foto: sem conexão com o servidor.', 'err');
+  } finally {
+    S.enviandoFoto = false;
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
   }
 }
 
@@ -2516,7 +2625,7 @@ let fotoScannerStream = null;
 let fotoScannerAtivo = false;
 
 async function abrirLeitorAvulso() {
-  if (!S.barcodeDetector) { toast('Leitor de código de barras não disponível neste navegador.', 'err'); return; }
+  if (!S.barcodeDetector || !cameraAoVivoDisponivel()) { pedirCodigoDigitado(); return; }
   try {
     fotoScannerStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false,
@@ -2529,6 +2638,13 @@ async function abrirLeitorAvulso() {
   } catch (e) {
     toast('Erro ao acessar câmera: ' + e.message, 'err');
   }
+}
+
+// iPhone nao tem BarcodeDetector (nem no Chrome de iOS, que e Safari por
+// baixo). Em vez de so avisar que nao da, deixa digitar o codigo na mao.
+function pedirCodigoDigitado() {
+  const codigo = prompt('Leitor de código de barras não disponível neste aparelho.\n\nDigite o código de barras ou o SKU:');
+  if (codigo && codigo.trim()) pularParaProdutoAvulso(codigo.trim());
 }
 
 function fecharLeitorAvulso() {
@@ -2820,6 +2936,7 @@ async function init() {
   $('#btn-abrir-camera-foto').addEventListener('click', startFotoCamera);
   $('#btn-fechar-foto-camera').addEventListener('click', stopFotoCamera);
   $('#btn-capturar-foto').addEventListener('click', capturarFoto);
+  $('#foto-input-nativo').addEventListener('change', onFotoNativaEscolhida);
   $('#btn-repetir-foto').addEventListener('click', repetirFoto);
   $('#btn-enviar-foto').addEventListener('click', enviarFotoAtual);
   $('#btn-pular-produto').addEventListener('click', pularProdutoFotografo);
