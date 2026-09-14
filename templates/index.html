@@ -272,12 +272,30 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
         <div id="foto-produto-atual" class="card" style="text-align:center;padding:24px"></div>
         <div style="display:flex;gap:8px;margin-top:12px;justify-content:center">
           <button class="btn-p" id="btn-abrir-camera-foto">Tirar Foto</button>
+          <button class="btn-o" id="btn-buscar-midia">Buscar no Google</button>
           <button class="btn-o" id="btn-pular-produto">Pular</button>
           <button class="btn-o" id="btn-ler-codigo-avulso">Ler Código de Barras</button>
         </div>
         <!-- Fallback: em HTTP (sem contexto seguro) e em navegadores sem
              getUserMedia, a camera nativa do celular ainda funciona por aqui. -->
         <input id="foto-input-nativo" type="file" accept="image/*" capture="environment" style="display:none">
+      </div>
+    </div>
+
+    <div id="midia-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:260;display:none;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto">
+      <div style="background:var(--surface);border-radius:var(--radius);padding:16px;max-width:760px;width:100%">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px">
+          <strong>Centro de Mídia · Busca de produto</strong>
+          <button class="btn-o btn-sm" id="btn-fechar-midia">Fechar</button>
+        </div>
+        <p id="midia-produto" style="margin-bottom:8px"></p>
+        <p style="color:var(--muted);font-size:.85rem;margin-bottom:12px">Abra a pesquisa no Google Imagens, confira marca, embalagem e volume, copie o endereço da imagem escolhida e cole abaixo.</p>
+        <div id="midia-status" style="color:var(--muted);margin-bottom:12px"></div>
+        <a class="btn-p" id="midia-google-link" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-bottom:12px">Abrir Google Imagens</a>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="midia-url" type="url" placeholder="Cole aqui o endereço HTTPS da imagem" style="flex:1;min-width:240px">
+          <button class="btn-p" id="btn-salvar-midia">Salvar imagem</button>
+        </div>
       </div>
     </div>
 
@@ -2377,6 +2395,7 @@ async function startFotografoInternal() {
   $('#fotografo-view').style.display = 'block';
   $('#hdr-filial').textContent = S.user.filialNome;
   $('#hdr-auditor').textContent = S.user.name;
+  $('#btn-buscar-midia').style.display = Number(S.user.filialId) === 63 ? '' : 'none';
   if (!S.dataReady) await loadAllData();
   await loadFotografoFila();
 }
@@ -2400,13 +2419,65 @@ function renderFotografoAtual() {
     el.innerHTML = '<strong>Loja concluída!</strong><p style="color:var(--muted);margin-top:8px">Todos os produtos bipados já foram fotografados.</p>';
     $('#btn-abrir-camera-foto').disabled = true;
     $('#btn-pular-produto').disabled = true;
+    $('#btn-buscar-midia').disabled = true;
     return;
   }
   $('#btn-abrir-camera-foto').disabled = false;
   $('#btn-pular-produto').disabled = false;
+  $('#btn-buscar-midia').disabled = false;
   const p = S.fotografoAtual;
   el.innerHTML = `<strong style="font-size:1.1rem">${escapeHtml(p.descricao)}</strong>
     <div style="color:var(--muted);font-size:.85rem;margin-top:4px">SKU: ${escapeHtml(p.codproduto || '-')} | EAN: ${escapeHtml(p.ean || '-')}</div>`;
+}
+
+async function buscarMidiaProduto() {
+  const produto = S.fotografoAtual;
+  if (!produto) return;
+  $('#midia-modal').style.display = 'flex';
+  $('#midia-produto').textContent = `${produto.descricao} · EAN: ${produto.ean || 'sem código'}`;
+  $('#midia-status').textContent = 'Preparando pesquisa por código de barras e nome...';
+  $('#midia-url').value = '';
+  try {
+    const r = await apiGet('fotografo/midia/buscar', { produtoId: produto.id });
+    if (S.fotografoAtual?.id !== produto.id) return;
+    $('#midia-google-link').href = r.googleUrl;
+    $('#midia-status').textContent = `Pesquisa pronta: ${r.query}`;
+  } catch (e) {
+    $('#midia-status').textContent = 'Não foi possível preparar a pesquisa. Tente novamente.';
+  }
+}
+
+async function salvarMidiaProduto() {
+  const produto = S.fotografoAtual;
+  if (!produto) return;
+  const url = $('#midia-url').value.trim();
+  const button = $('#btn-salvar-midia');
+  button.disabled = true;
+  button.textContent = 'Salvando...';
+  try {
+    const prep = await fetch('/api/fotografo/midia/preparar', {
+      method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ produtoId: produto.id, url }),
+    });
+    const prepared = await prep.json();
+    if (!prepared.ok) throw new Error(prepared.error || 'Endereço da imagem inválido');
+    const resp = await fetch('/api/fotografo/midia/salvar', {
+      method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ produtoId: produto.id, url, token: prepared.token }),
+    });
+    const r = await resp.json();
+    if (!r.ok) throw new Error(r.error || 'Falha ao salvar imagem');
+    $('#midia-modal').style.display = 'none';
+    S.fotografoFila = S.fotografoFila.filter(p => p.id !== produto.id);
+    S.totalFotografado++;
+    S.fotografoAtual = S.fotografoFila[0] || null;
+    renderFotografoAtual();
+    toast('Imagem salva no Centro de Mídia!', 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+    button.disabled = false;
+    button.textContent = 'Salvar imagem';
+  }
 }
 
 // getUserMedia so existe em contexto seguro (HTTPS ou localhost). Em HTTP,
@@ -2934,6 +3005,9 @@ async function init() {
 
   // Event: fotografo
   $('#btn-abrir-camera-foto').addEventListener('click', startFotoCamera);
+  $('#btn-buscar-midia').addEventListener('click', buscarMidiaProduto);
+  $('#btn-fechar-midia').addEventListener('click', () => $('#midia-modal').style.display = 'none');
+  $('#btn-salvar-midia').addEventListener('click', salvarMidiaProduto);
   $('#btn-fechar-foto-camera').addEventListener('click', stopFotoCamera);
   $('#btn-capturar-foto').addEventListener('click', capturarFoto);
   $('#foto-input-nativo').addEventListener('change', onFotoNativaEscolhida);

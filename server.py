@@ -5,14 +5,18 @@ import hmac
 import io
 import json
 import os
+import ipaddress
+import socket
 import time
 import threading
 import unicodedata
 import zipfile
+from urllib.parse import urlparse, urlencode
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
+from PIL import Image, UnidentifiedImageError
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
@@ -630,6 +634,126 @@ def fotografo_listar_fotos():
         for pid, info in fotos_filial.items()
     ]
     return jsonify({"ok": True, "fotos": resultado})
+
+
+def _midia_produto_autorizado(produto_id):
+    user = _usuario_autenticado(("fotografo", "bipador"))
+    if not user:
+        return None, None
+    produto = next((p for p in CACHE.get("produtos", []) if p.get("id") == produto_id), None)
+    if not produto:
+        return user, None
+    try:
+        filial_id = int(user["filialId"])
+    except (KeyError, TypeError, ValueError):
+        return user, None
+    if filial_id != 63:  # Piloto do Centro de Midia: Status Cosmeticos (CS002).
+        return user, None
+    if produto_id not in {p["id"] for p in _produtos_bipados_ordenados(filial_id)}:
+        return user, None
+    return user, produto
+
+
+def _midia_url_publica(url):
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 443):
+            return False
+        addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+        return bool(addresses) and all(ipaddress.ip_address(info[4][0]).is_global for info in addresses)
+    except (OSError, ValueError):
+        return False
+
+
+@app.route("/api/fotografo/midia/buscar")
+def fotografo_buscar_midia():
+    try:
+        produto_id = int(request.args.get("produtoId", ""))
+    except ValueError:
+        return jsonify({"ok": False, "error": "produtoId invalido."}), 400
+    user, produto = _midia_produto_autorizado(produto_id)
+    if not user:
+        return jsonify({"ok": False, "error": "Nao autorizado."}), 401
+    if not produto:
+        return jsonify({"ok": False, "error": "Produto fora da fila desta loja."}), 403
+
+    ean = str(produto.get("ean") or "").strip()
+    nome = str(produto.get("descricao") or "").strip()
+    query = " ".join(part for part in (ean, nome) if part).strip()
+    return jsonify({"ok": True,
+                    "googleUrl": "https://www.google.com/search?" + urlencode({"q": query[:180], "udm": 2}),
+                    "query": query})
+
+
+@app.route("/api/fotografo/midia/preparar", methods=["POST"])
+def fotografo_preparar_midia():
+    data = request.get_json(silent=True) or {}
+    try:
+        produto_id = int(data.get("produtoId"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "produtoId invalido."}), 400
+    user, produto = _midia_produto_autorizado(produto_id)
+    if not user:
+        return jsonify({"ok": False, "error": "Nao autorizado."}), 401
+    if not produto:
+        return jsonify({"ok": False, "error": "Produto fora da fila desta loja."}), 403
+    url = data.get("url")
+    if not isinstance(url, str) or len(url) > 2048 or not _midia_url_publica(url):
+        return jsonify({"ok": False, "error": "Cole o endereco HTTPS direto da imagem."}), 400
+    msg = f"{produto_id}|{url}".encode()
+    token = hmac.new(ADMIN_PASSWORD.encode(), msg, hashlib.sha256).hexdigest()
+    return jsonify({"ok": True, "token": token})
+
+
+@app.route("/api/fotografo/midia/salvar", methods=["POST"])
+def fotografo_salvar_midia():
+    data = request.get_json(silent=True) or {}
+    try:
+        produto_id = int(data.get("produtoId"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "produtoId invalido."}), 400
+    user, produto = _midia_produto_autorizado(produto_id)
+    if not user:
+        return jsonify({"ok": False, "error": "Nao autorizado."}), 401
+    if not produto:
+        return jsonify({"ok": False, "error": "Produto fora da fila desta loja."}), 403
+    url = data.get("url")
+    token = data.get("token")
+    if not isinstance(url, str) or len(url) > 2048 or not isinstance(token, str):
+        return jsonify({"ok": False, "error": "Imagem invalida."}), 400
+    expected = hmac.new(ADMIN_PASSWORD.encode(), f"{produto_id}|{url}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(token, expected) or not _midia_url_publica(url):
+        return jsonify({"ok": False, "error": "Imagem nao autorizada."}), 403
+    try:
+        response = requests.get(url, timeout=10, stream=True, allow_redirects=False)
+        response.raise_for_status()
+        if response.is_redirect or not response.headers.get("Content-Type", "").lower().startswith("image/"):
+            raise ValueError("Resposta nao e imagem direta")
+        content = bytearray()
+        for chunk in response.iter_content(65536):
+            content.extend(chunk)
+            if len(content) > 8 * 1024 * 1024:
+                raise ValueError("Imagem muito grande")
+        with Image.open(io.BytesIO(content)) as img:
+            img.verify()
+        with Image.open(io.BytesIO(content)) as img:
+            if img.width * img.height > 30_000_000:
+                raise ValueError("Imagem muito grande")
+            converted = img.convert("RGB")
+            filial_id = int(user["filialId"])
+            pasta = os.path.join(FOTOS_DIR, str(filial_id))
+            os.makedirs(pasta, exist_ok=True)
+            converted.save(os.path.join(pasta, f"{produto_id}.jpg"), "JPEG", quality=88)
+    except (requests.RequestException, ValueError, UnidentifiedImageError, OSError):
+        return jsonify({"ok": False, "error": "Nao foi possivel baixar esta imagem. Escolha outra."}), 422
+    with _fotos_lock:
+        fotos = _load_fotos()
+        fotos.setdefault(str(filial_id), {})[str(produto_id)] = {
+            "arquivo": f"{filial_id}/{produto_id}.jpg", "fotografadoPor": user["email"],
+            "fotografadoEm": datetime.now().isoformat(), "origem": "internet", "urlOrigem": url,
+        }
+        _save_fotos(fotos)
+    return jsonify({"ok": True, "url": f"/api/fotos/{filial_id}/{produto_id}.jpg"})
 
 
 @app.route("/api/admin/fotos/zip", methods=["POST"])

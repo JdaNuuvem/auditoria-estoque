@@ -116,6 +116,31 @@ def test_fila_fotografo_sem_autenticacao_retorna_401(client):
     assert resp.status_code == 401
 
 
+def test_centro_midia_so_libera_status_cosmeticos(client, monkeypatch):
+    from unittest.mock import patch
+
+    server.CACHE["produtos"] = [
+        {"id": 10, "descricao": "Base Forca Extrema 7,5ml", "ean": "7896111994344"},
+    ]
+    monkeypatch.setattr(server, "_produtos_bipados_ordenados", lambda filial: server.CACHE["produtos"])
+    status_headers = _cria_usuario(client, "status@x.com", 63)
+    outra_headers = _cria_usuario(client, "outra@x.com", 1)
+
+    with patch.object(server.requests, "get") as internet:
+        resp = client.get("/api/fotografo/midia/buscar?produtoId=10", headers=status_headers)
+        assert resp.status_code == 200
+        assert "7896111994344" in resp.get_json()["googleUrl"]
+        assert "google.com/search" in resp.get_json()["googleUrl"]
+        internet.assert_not_called()
+
+    resp = client.get("/api/fotografo/midia/buscar?produtoId=10", headers=outra_headers)
+    assert resp.status_code == 403
+    resp = client.post("/api/fotografo/midia/preparar", headers=outra_headers,
+                       json={"produtoId": 10, "url": "https://example.com/foto.jpg"})
+    assert resp.status_code == 403
+    server.CACHE["produtos"] = []
+
+
 def test_fila_fotografo_admin_sem_filial_id_retorna_400(client):
     resp = client.get("/api/fotografo/fila", headers=_admin_h())
     assert resp.status_code == 400
