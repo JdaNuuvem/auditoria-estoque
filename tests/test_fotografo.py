@@ -141,6 +141,26 @@ def test_centro_midia_so_libera_status_cosmeticos(client, monkeypatch):
     server.CACHE["produtos"] = []
 
 
+def test_admin_inicia_automacao_midia_em_lote(client, monkeypatch):
+    iniciado = []
+    class ThreadFake:
+        def __init__(self, target, args, daemon):
+            iniciado.append((target, args, daemon))
+        def start(self):
+            pass
+    monkeypatch.setattr(server.threading, "Thread", ThreadFake)
+    monkeypatch.setattr(server, "_midia_auto_running", False)
+    resp = client.post("/api/admin/midia/automacao", headers=_admin_h(), json={"limit": 20})
+    assert resp.status_code == 200
+    assert iniciado[0][1] == (20,)
+    assert iniciado[0][2] is True
+
+
+def test_admin_automacao_midia_exige_autenticacao(client):
+    assert client.get("/api/admin/midia/automacao").status_code == 401
+    assert client.post("/api/admin/midia/automacao", json={"limit": 20}).status_code == 401
+
+
 def test_fila_fotografo_admin_sem_filial_id_retorna_400(client):
     resp = client.get("/api/fotografo/fila", headers=_admin_h())
     assert resp.status_code == 400

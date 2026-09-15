@@ -464,6 +464,9 @@ def audit_sessions():
 FOTOS_FILE = os.path.join(DATA_DIR, "fotos_por_filial.json")
 FOTOS_DIR = os.path.join(DATA_DIR, "fotos")
 _fotos_lock = threading.Lock()
+MIDIA_AUTO_FILE = os.path.join(DATA_DIR, "midia_automacao.json")
+_midia_auto_lock = threading.Lock()
+_midia_auto_running = False
 
 
 def _load_fotos():
@@ -477,6 +480,140 @@ def _load_fotos():
 def _save_fotos(fotos):
     with open(FOTOS_FILE, "w", encoding="utf-8") as f:
         json.dump(fotos, f, ensure_ascii=False)
+
+
+def _buscar_foto_ean(ean):
+    """Fontes com identificador exato. Mercado Livre entra quando o admin
+    configurar um token; as bases abertas funcionam sem chave."""
+    token_ml = os.environ.get("MERCADOLIVRE_ACCESS_TOKEN")
+    if token_ml:
+        try:
+            r = requests.get("https://api.mercadolibre.com/products/search",
+                             params={"site_id": "MLB", "status": "active", "q": ean},
+                             headers={"Authorization": f"Bearer {token_ml}"}, timeout=8)
+            r.raise_for_status()
+            for product in r.json().get("results", []):
+                attrs = product.get("attributes") or []
+                gtins = {str(a.get("value_name") or "") for a in attrs if a.get("id") in ("GTIN", "EAN")}
+                pics = product.get("pictures") or []
+                if ean in gtins and pics and pics[0].get("url"):
+                    return pics[0]["url"], "Mercado Livre"
+        except (requests.RequestException, ValueError):
+            pass
+    for domain, fonte in (("world.openbeautyfacts.org", "Open Beauty Facts"),
+                          ("world.openproductsfacts.org", "Open Products Facts"),
+                          ("world.openfoodfacts.org", "Open Food Facts")):
+        try:
+            r = requests.get(f"https://{domain}/api/v2/product/{ean}.json",
+                             params={"fields": "code,image_front_url"},
+                             headers={"User-Agent": "AtualizacaoEstoque/1.0"}, timeout=8)
+            r.raise_for_status()
+            p = r.json().get("product") or {}
+            if str(p.get("code")) == ean and p.get("image_front_url"):
+                return p["image_front_url"], fonte
+        except (requests.RequestException, ValueError):
+            pass
+    return None, None
+
+
+def _midia_auto_save(state):
+    with open(MIDIA_AUTO_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False)
+
+
+def _midia_auto_worker(limit):
+    global _midia_auto_running
+    try:
+        fotos = _load_fotos()
+        existentes = set((fotos.get("63") or {}).keys())
+        estoque_ids = {e.get("idproduto") for e in CACHE.get("estoques", [])
+                       if e.get("filial") == 63 and float(e.get("qtd") or 0) > 0}
+        produtos = [p for p in CACHE.get("produtos", []) if p.get("id") in estoque_ids
+                    and str(p.get("id")) not in existentes and str(p.get("ean") or "").isdigit()]
+        if limit:
+            produtos = produtos[:limit]
+        state = {"running": True, "total": len(produtos), "processados": 0,
+                 "encontrados": 0, "naoEncontrados": 0, "erros": 0,
+                 "iniciadoEm": datetime.now().isoformat(), "atual": None}
+        _midia_auto_save(state)
+        for produto in produtos:
+            state["atual"] = {"id": produto["id"], "descricao": produto.get("descricao")}
+            ean = str(produto.get("ean"))
+            url, fonte = _buscar_foto_ean(ean)
+            if url:
+                # Registra candidato exato para revisão; não mistura embalagem
+                # errada no acervo sem decisão do administrador.
+                state.setdefault("candidatos", []).append({"produtoId": produto["id"],
+                    "descricao": produto.get("descricao"), "ean": ean, "url": url, "fonte": fonte})
+                state["encontrados"] += 1
+            else:
+                state["naoEncontrados"] += 1
+            state["processados"] += 1
+            state["candidatos"] = state.get("candidatos", [])[-200:]
+            _midia_auto_save(state)
+            time.sleep(1)
+        state.update({"running": False, "atual": None, "finalizadoEm": datetime.now().isoformat()})
+        _midia_auto_save(state)
+    finally:
+        _midia_auto_running = False
+
+
+@app.route("/api/admin/midia/automacao", methods=["GET", "POST"])
+def admin_midia_automacao():
+    global _midia_auto_running
+    if not _admin_header_ok():
+        return jsonify({"ok": False, "error": "Nao autorizado."}), 401
+    if request.method == "POST":
+        if _midia_auto_running:
+            return jsonify({"ok": False, "error": "Automacao ja esta em execucao."}), 409
+        data = request.get_json(silent=True) or {}
+        limit = max(1, min(int(data.get("limit") or 50), 500))
+        _midia_auto_running = True
+        threading.Thread(target=_midia_auto_worker, args=(limit,), daemon=True).start()
+    state = _load_json_file(MIDIA_AUTO_FILE, {})
+    state["running"] = _midia_auto_running
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/admin/midia/aprovar", methods=["POST"])
+def admin_midia_aprovar():
+    if not _admin_header_ok():
+        return jsonify({"ok": False, "error": "Nao autorizado."}), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        produto_id = int(data.get("produtoId"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Produto invalido."}), 400
+    url = data.get("url")
+    if not isinstance(url, str) or not _midia_url_publica(url):
+        return jsonify({"ok": False, "error": "Imagem invalida."}), 400
+    try:
+        r = requests.get(url, timeout=12, stream=True, allow_redirects=False)
+        r.raise_for_status()
+        if r.is_redirect or not r.headers.get("Content-Type", "").lower().startswith("image/"):
+            raise ValueError()
+        content = bytearray()
+        for chunk in r.iter_content(65536):
+            content.extend(chunk)
+            if len(content) > 8 * 1024 * 1024:
+                raise ValueError()
+        with Image.open(io.BytesIO(content)) as img:
+            img.verify()
+        with Image.open(io.BytesIO(content)) as img:
+            if img.width * img.height > 30_000_000:
+                raise ValueError()
+            pasta = os.path.join(FOTOS_DIR, "63")
+            os.makedirs(pasta, exist_ok=True)
+            img.convert("RGB").save(os.path.join(pasta, f"{produto_id}.jpg"), "JPEG", quality=88)
+    except (requests.RequestException, ValueError, UnidentifiedImageError, OSError):
+        return jsonify({"ok": False, "error": "Nao foi possivel importar a imagem."}), 422
+    with _fotos_lock:
+        fotos = _load_fotos()
+        fotos.setdefault("63", {})[str(produto_id)] = {"arquivo": f"63/{produto_id}.jpg",
+            "fotografadoPor": "admin-automacao", "fotografadoEm": datetime.now().isoformat(),
+            "origem": "internet", "urlOrigem": url}
+        _save_fotos(fotos)
+    return jsonify({"ok": True})
 
 
 def _produtos_bipados_ordenados(filial_id):

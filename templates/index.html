@@ -386,6 +386,16 @@ main{flex:1;padding:16px;max-width:1400px;width:100%;margin:0 auto}
       <div id="bipadores-list"></div>
     </div>
     <div id="fotos-view" style="display:none">
+      <div class="card" style="margin-bottom:16px">
+        <h3 style="margin-bottom:8px">Automação de imagens · Status Cosméticos</h3>
+        <p style="color:var(--muted);font-size:.85rem;margin-bottom:10px">Procura por EAN exato no Mercado Livre quando houver token configurado e em bases públicas. Os resultados ficam para sua revisão.</p>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="midia-auto-limite" style="max-width:170px"><option value="20">Lote de 20</option><option value="50" selected>Lote de 50</option><option value="100">Lote de 100</option><option value="500">Lote de 500</option></select>
+          <button class="btn-p" id="btn-iniciar-midia-auto">Iniciar busca automática</button>
+          <span id="midia-auto-status" style="font-size:.85rem;color:var(--muted)"></span>
+        </div>
+        <div id="midia-auto-candidatos" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-top:12px"></div>
+      </div>
       <div class="card">
         <h3 style="margin-bottom:12px">Fotografia por Loja</h3>
         <div id="fotos-progresso-list"></div>
@@ -2259,6 +2269,7 @@ async function loadBipadoresList() {
 }
 
 async function carregarProgressoFotosPorLoja() {
+  carregarAutomacaoMidia();
   const linhas = await Promise.all(S.filiais.map(async f => {
     const r = await apiGet('fotografo/fila', { filialId: f.id, resumo: 1 }, { admin: true });
     return { filial: f, totalBipado: r.total_bipado || 0, totalFotografado: r.total_fotografado || 0 };
@@ -2428,6 +2439,54 @@ function renderFotografoAtual() {
   const p = S.fotografoAtual;
   el.innerHTML = `<strong style="font-size:1.1rem">${escapeHtml(p.descricao)}</strong>
     <div style="color:var(--muted);font-size:.85rem;margin-top:4px">SKU: ${escapeHtml(p.codproduto || '-')} | EAN: ${escapeHtml(p.ean || '-')}</div>`;
+}
+
+async function carregarAutomacaoMidia() {
+  try {
+    const r = await apiGet('admin/midia/automacao', {}, { admin: true });
+    const s = r.state || {};
+    $('#btn-iniciar-midia-auto').disabled = !!s.running;
+    $('#midia-auto-status').textContent = s.running
+      ? `Buscando: ${s.processados || 0} de ${s.total || 0} · ${s.encontrados || 0} encontrados`
+      : (s.total ? `Último lote: ${s.processados || 0} processados · ${s.encontrados || 0} encontrados` : 'Ainda não executada');
+    $('#midia-auto-candidatos').innerHTML = (s.candidatos || []).slice().reverse().map(c => `
+      <div class="card" style="padding:6px">
+        <a href="${escapeHtml(c.url)}" target="_blank" rel="noopener noreferrer">
+        <img src="${escapeHtml(c.url)}" loading="lazy" style="width:100%;height:100px;object-fit:contain">
+        </a>
+        <div style="font-size:.72rem;color:var(--text)">${escapeHtml(c.descricao || '')}</div>
+        <div style="font-size:.68rem;color:var(--muted)">${escapeHtml(c.fonte || '')} · ${escapeHtml(c.ean || '')}</div>
+        <button class="btn-s btn-sm" style="width:100%;margin-top:5px" onclick="aprovarMidiaAdmin(${Number(c.produtoId)},decodeURIComponent('${encodeURIComponent(c.url).replace(/'/g, '%27')}'))">Aprovar e salvar</button>
+      </div>`).join('');
+    if (s.running) setTimeout(carregarAutomacaoMidia, 3000);
+  } catch (e) {
+    $('#midia-auto-status').textContent = 'Falha ao consultar automação.';
+  }
+}
+
+async function aprovarMidiaAdmin(produtoId, url) {
+  try {
+    const resp = await fetch('/api/admin/midia/aprovar', { method:'POST',
+      headers:{...adminHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({produtoId,url}) });
+    const r = await resp.json();
+    if (!r.ok) throw new Error(r.error || 'Falha ao importar');
+    toast('Imagem aprovada e salva.', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+async function iniciarAutomacaoMidia() {
+  const btn = $('#btn-iniciar-midia-auto');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/admin/midia/automacao', {
+      method: 'POST', headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: Number($('#midia-auto-limite').value) }),
+    });
+    const r = await resp.json();
+    if (!r.ok) throw new Error(r.error || 'Falha ao iniciar');
+    toast('Busca automática iniciada para a Status Cosméticos.', 'ok');
+    carregarAutomacaoMidia();
+  } catch (e) { toast(e.message, 'err'); btn.disabled = false; }
 }
 
 async function buscarMidiaProduto() {
@@ -2989,6 +3048,7 @@ async function init() {
 
   // Event: debug
   $('#btn-test-connection').addEventListener('click', testConnection);
+  $('#btn-iniciar-midia-auto').addEventListener('click', iniciarAutomacaoMidia);
   $('#btn-pull-200').addEventListener('click', pullSyncedProducts);
 
   // Event: print label
